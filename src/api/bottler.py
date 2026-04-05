@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, field_validator
 from typing import List
 from src.api import auth
+import sqlalchemy
+from src import database as db
 
 router = APIRouter(
     prefix="/bottler",
@@ -37,9 +39,45 @@ def post_deliver_bottles(potions_delivered: List[PotionMixes], order_id: int):
     """
     print(f"potions delivered: {potions_delivered} order_id: {order_id}")
 
-    # TODO: Record values of delivered potions in your database.
-    # TODO: Subtract ml based on how much delivered potions used.
-    pass
+    with db.engine.begin() as connection:
+        for potion in potions_delivered:
+            ml_used = potion.quantity * 100
+
+            if potion.potion_type == [100, 0, 0, 0]:
+                connection.execute(
+                    sqlalchemy.text(
+                        """
+                        UPDATE global_inventory
+                        SET red_ml = red_ml - :ml_used,
+                            red_potions = red_potions + :quantity
+                        """
+                    ),
+                    {"ml_used": ml_used, "quantity": potion.quantity},
+                )
+
+            elif potion.potion_type == [0, 100, 0, 0]:
+                connection.execute(
+                    sqlalchemy.text(
+                        """
+                        UPDATE global_inventory
+                        SET green_ml = green_ml - :ml_used,
+                            green_potions = green_potions + :quantity
+                        """
+                    ),
+                    {"ml_used": ml_used, "quantity": potion.quantity},
+                )
+
+            elif potion.potion_type == [0, 0, 100, 0]:
+                connection.execute(
+                    sqlalchemy.text(
+                        """
+                        UPDATE global_inventory
+                        SET blue_ml = blue_ml - :ml_used,
+                            blue_potions = blue_potions + :quantity
+                        """
+                    ),
+                    {"ml_used": ml_used, "quantity": potion.quantity},
+                )
 
 
 def create_bottle_plan(
@@ -50,13 +88,39 @@ def create_bottle_plan(
     maximum_potion_capacity: int,
     current_potion_inventory: List[PotionMixes],
 ) -> List[PotionMixes]:
-    # TODO: Create a real bottle plan logic
-    return [
-        PotionMixes(
-            potion_type=[100, 0, 0, 0],
-            quantity=5,
+    plan: List[PotionMixes] = []
+
+    # num potions that can be made
+    red_quantity = red_ml // 100
+    green_quantity = green_ml // 100
+    blue_quantity = blue_ml // 100
+
+    # make potions 
+    if red_quantity > 0:
+        plan.append(
+            PotionMixes(
+                potion_type=[100, 0, 0, 0],
+                quantity=red_quantity,
+            )
         )
-    ]
+
+    if green_quantity > 0:
+        plan.append(
+            PotionMixes(
+                potion_type=[0, 100, 0, 0],
+                quantity=green_quantity,
+            )
+        )
+
+    if blue_quantity > 0:
+        plan.append(
+            PotionMixes(
+                potion_type=[0, 0, 100, 0],
+                quantity=blue_quantity,
+            )
+        )
+
+    return plan
 
 
 @router.post("/plan", response_model=List[PotionMixes])
@@ -67,11 +131,25 @@ def get_bottle_plan():
     Colors are expressed in integers from 0 to 100 that must sum up to exactly 100.
     """
 
+    with db.engine.begin() as connection:
+        row = connection.execute(
+            sqlalchemy.text(
+                """
+                SELECT red_ml, green_ml, blue_ml
+                FROM global_inventory
+                """
+            )
+        ).one()
+
+        current_red_ml = row.red_ml
+        current_green_ml = row.green_ml
+        current_blue_ml = row.blue_ml
+
     # TODO: Fill in values below based on what is in your database
     return create_bottle_plan(
-        red_ml=100,
-        green_ml=0,
-        blue_ml=0,
+        red_ml=current_red_ml,
+        green_ml=current_green_ml,
+        blue_ml=current_blue_ml,
         dark_ml=0,
         maximum_potion_capacity=50,
         current_potion_inventory=[],

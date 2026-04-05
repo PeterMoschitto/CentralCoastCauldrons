@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import random
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, field_validator
 from typing import List
@@ -71,6 +72,33 @@ def post_deliver_barrels(barrels_delivered: List[Barrel], order_id: int):
             [{"gold_paid": delivery.gold_paid}],
         )
 
+        # add ml for each barrel
+        for barrel in barrels_delivered:
+            total_ml = barrel.ml_per_barrel * barrel.quantity
+
+            if barrel.potion_type[0] == 1:
+                connection.execute(
+                    sqlalchemy.text(
+                        "UPDATE global_inventory SET red_ml = red_ml + :ml"
+                    ),
+                    {"ml": total_ml},
+                )
+
+            elif barrel.potion_type[1] == 1:
+                connection.execute(
+                    sqlalchemy.text(
+                        "UPDATE global_inventory SET green_ml = green_ml + :ml"
+                    ),
+                    {"ml": total_ml},
+                )
+
+            elif barrel.potion_type[2] == 1:
+                connection.execute(
+                    sqlalchemy.text(
+                        "UPDATE global_inventory SET blue_ml = blue_ml + :ml"
+                    ),
+                    {"ml": total_ml},
+                )
     pass
 
 
@@ -81,22 +109,50 @@ def create_barrel_plan(
     current_green_ml: int,
     current_blue_ml: int,
     current_dark_ml: int,
+    current_red_potions: int,
+    current_green_potions: int,
+    current_blue_potions: int,
     wholesale_catalog: List[Barrel],
 ) -> List[BarrelOrder]:
     print(
         f"gold: {gold}, max_barrel_capacity: {max_barrel_capacity}, current_red_ml: {current_red_ml}, current_green_ml: {current_green_ml}, current_blue_ml: {current_blue_ml}, current_dark_ml: {current_dark_ml}, wholesale_catalog: {wholesale_catalog}"
     )
 
-    # find cheapest red barrel
-    red_barrel = min(
-        (barrel for barrel in wholesale_catalog if barrel.potion_type[0] == 1),
-        key=lambda b: b.price,
-        default=None,
-    )
+    # randomly pick red, green, blue
+    random_color = random.choice(["red", "green", "blue"])
+
+    #maps to potion count and the randomly selected color 
+    potion_counts = {
+        "red": current_red_potions,
+        "green": current_green_potions,
+        "blue": current_blue_potions,
+    }
+
+    color_index = {
+        "red": 0,
+        "green": 1,
+        "blue": 2,
+    }
+
+    #if more than 5 potions buy nothing
+    if potion_counts[random_color] >= 5:
+        return []
+
+    # find pure barrel
+    matching_barrels = [
+        barrel for barrel in wholesale_catalog if barrel.potion_type[color_index[random_color]] == 1
+    ]
+
+    # dont buy if not pure barrel
+    if not matching_barrels:
+        return []
+    
+    # smallest barrel of random color
+    small_barrel = min(matching_barrels, key=lambda b: b.ml_per_barrel)
 
     # make sure we can afford it
-    if red_barrel and red_barrel.price <= gold:
-        return [BarrelOrder(sku=red_barrel.sku, quantity=1)]
+    if small_barrel.price <= gold:
+        return [BarrelOrder(sku=small_barrel.sku, quantity=1)]
 
     # return an empty list if no affordable red barrel is found
     return []
@@ -114,21 +170,33 @@ def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
         row = connection.execute(
             sqlalchemy.text(
                 """
-                SELECT gold
+                SELECT gold, red_ml, green_ml, blue_ml,
+                    red_potions, green_potions, blue_potions
                 FROM global_inventory
                 """
             )
         ).one()
 
-        gold = row.gold
+    gold = row.gold
+    current_red_ml = row.red_ml
+    current_green_ml = row.green_ml
+    current_blue_ml = row.blue_ml
+    current_red_potions = row.red_potions
+    current_green_potions = row.green_potions
+    current_blue_potions = row.blue_potions
+
+    
 
     # TODO: fill in values correctly based on what is in your database
     return create_barrel_plan(
         gold=gold,
         max_barrel_capacity=10000,
-        current_red_ml=0,
-        current_green_ml=0,
-        current_blue_ml=0,
+        current_red_ml=current_red_ml,
+        current_green_ml=current_green_ml,
+        current_blue_ml=current_blue_ml,
         current_dark_ml=0,
+        current_red_potions = current_red_potions,
+        current_green_potions = current_green_potions,
+        current_blue_potions = current_blue_potions,
         wholesale_catalog=wholesale_catalog,
     )
