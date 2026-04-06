@@ -1,8 +1,12 @@
-from fastapi import APIRouter
+import sqlalchemy
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from typing import List, Annotated
 
-router = APIRouter()
+from src.api import auth
+from src import database as db
+
+router = APIRouter(dependencies=[Depends(auth.get_api_key)])
 
 
 class CatalogItem(BaseModel):
