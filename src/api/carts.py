@@ -137,7 +137,7 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
         raise HTTPException(status_code=404, detail="Cart not found")
 
     total_potions_bought = sum(carts[cart_id].values())
-    total_gold_paid = total_potions_bought * 50 
+    total_gold_paid = total_potions_bought * 30 
 
     with db.engine.begin() as connection:
         # add gold from purchase
