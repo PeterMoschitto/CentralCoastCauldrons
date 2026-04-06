@@ -12,6 +12,13 @@ router = APIRouter(
     dependencies=[Depends(auth.get_api_key)],
 )
 
+# Must match prices returned in GET /catalog/ for each SKU.
+SKU_PRICE_GOLD: dict[str, int] = {
+    "RED_POTION": 30,
+    "GREEN_POTION": 30,
+    "BLUE_POTION": 30,
+}
+
 
 class SearchSortOptions(str, Enum):
     customer_name = "customer_name"
@@ -137,7 +144,14 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
         raise HTTPException(status_code=404, detail="Cart not found")
 
     total_potions_bought = sum(carts[cart_id].values())
-    total_gold_paid = total_potions_bought * 30 
+    total_gold_paid = 0
+    for item_sku, quantity in carts[cart_id].items():
+        if item_sku not in SKU_PRICE_GOLD:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown item sku: {item_sku}",
+            )
+        total_gold_paid += SKU_PRICE_GOLD[item_sku] * quantity
 
     with db.engine.begin() as connection:
         # add gold from purchase
