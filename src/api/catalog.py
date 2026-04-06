@@ -38,7 +38,7 @@ def create_catalog() -> List[CatalogItem]:
                 sku="RED_POTION",
                 name="red potion",
                 quantity=row.red_potions,
-                price=50,
+                price=30,
                 potion_type=[100, 0, 0, 0],
             )
         )
@@ -48,7 +48,7 @@ def create_catalog() -> List[CatalogItem]:
                 sku="GREEN_POTION",
                 name="Green potion",
                 quantity=row.green_potions,
-                price=50,
+                price=30,
                 potion_type=[0, 100, 0, 0]
             )
         )
@@ -59,7 +59,7 @@ def create_catalog() -> List[CatalogItem]:
                 sku="BLUE_POTION",
                 name="blue potion",
                 quantity=row.blue_potions,
-                price=50,
+                price=30,
                 potion_type=[0, 0, 100, 0]
             )
         )
