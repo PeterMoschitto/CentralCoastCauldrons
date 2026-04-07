@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 import sqlalchemy
 from src.api import auth
+from src.api.catalog import SKU_PRICE_GOLD
 from enum import Enum
 from typing import List, Optional
 from src import database as db
@@ -11,14 +12,6 @@ router = APIRouter(
     tags=["cart"],
     dependencies=[Depends(auth.get_api_key)],
 )
-
-# Must match prices returned in GET /catalog/ for each SKU.
-SKU_PRICE_GOLD: dict[str, int] = {
-    "RED_POTION": 30,
-    "GREEN_POTION": 30,
-    "BLUE_POTION": 30,
-}
-
 
 class SearchSortOptions(str, Enum):
     customer_name = "customer_name"

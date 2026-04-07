@@ -6,6 +6,13 @@ from typing import List, Annotated
 from src.api import auth
 from src import database as db
 
+# Checkout must use these same values (see carts.checkout).
+SKU_PRICE_GOLD: dict[str, int] = {
+    "RED_POTION": 30,
+    "GREEN_POTION": 30,
+    "BLUE_POTION": 30,
+}
+
 router = APIRouter(dependencies=[Depends(auth.get_api_key)])
 
 
@@ -42,7 +49,7 @@ def create_catalog() -> List[CatalogItem]:
                 sku="RED_POTION",
                 name="red potion",
                 quantity=row.red_potions,
-                price=30,
+                price=SKU_PRICE_GOLD["RED_POTION"],
                 potion_type=[100, 0, 0, 0],
             )
         )
@@ -52,7 +59,7 @@ def create_catalog() -> List[CatalogItem]:
                 sku="GREEN_POTION",
                 name="Green potion",
                 quantity=row.green_potions,
-                price=30,
+                price=SKU_PRICE_GOLD["GREEN_POTION"],
                 potion_type=[0, 100, 0, 0]
             )
         )
@@ -63,7 +70,7 @@ def create_catalog() -> List[CatalogItem]:
                 sku="BLUE_POTION",
                 name="blue potion",
                 quantity=row.blue_potions,
-                price=30,
+                price=SKU_PRICE_GOLD["BLUE_POTION"],
                 potion_type=[0, 0, 100, 0]
             )
         )

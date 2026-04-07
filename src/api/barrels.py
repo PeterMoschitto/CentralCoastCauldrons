@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 import random
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, field_validator
@@ -51,6 +52,15 @@ def calculate_barrel_summary(barrels: List[Barrel]) -> BarrelSummary:
     return BarrelSummary(gold_paid=sum(b.price * b.quantity for b in barrels))
 
 
+def _ml_column_for_pure_barrel(barrel: Barrel) -> str | None:
+    """Pure-color wholesale barrels: one of r,g,b is 1.0. Use isclose so JSON floats match."""
+    pt = barrel.potion_type
+    for i, col in enumerate(("red_ml", "green_ml", "blue_ml")):
+        if math.isclose(pt[i], 1.0, rel_tol=0, abs_tol=1e-5):
+            return col
+    return None
+
+
 @router.post("/deliver/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
 def post_deliver_barrels(barrels_delivered: List[Barrel], order_id: int):
     """
@@ -72,33 +82,18 @@ def post_deliver_barrels(barrels_delivered: List[Barrel], order_id: int):
             [{"gold_paid": delivery.gold_paid}],
         )
 
-        # add ml for each barrel
+        # add ml for each barrel (float-safe; strict == 1 can miss JSON 1.0)
         for barrel in barrels_delivered:
             total_ml = barrel.ml_per_barrel * barrel.quantity
-
-            if barrel.potion_type[0] == 1:
-                connection.execute(
-                    sqlalchemy.text(
-                        "UPDATE global_inventory SET red_ml = red_ml + :ml"
-                    ),
-                    {"ml": total_ml},
-                )
-
-            elif barrel.potion_type[1] == 1:
-                connection.execute(
-                    sqlalchemy.text(
-                        "UPDATE global_inventory SET green_ml = green_ml + :ml"
-                    ),
-                    {"ml": total_ml},
-                )
-
-            elif barrel.potion_type[2] == 1:
-                connection.execute(
-                    sqlalchemy.text(
-                        "UPDATE global_inventory SET blue_ml = blue_ml + :ml"
-                    ),
-                    {"ml": total_ml},
-                )
+            col = _ml_column_for_pure_barrel(barrel)
+            if col is None:
+                continue
+            connection.execute(
+                sqlalchemy.text(
+                    f"UPDATE global_inventory SET {col} = {col} + :ml"
+                ),
+                {"ml": total_ml},
+            )
     pass
 
 
@@ -138,9 +133,12 @@ def create_barrel_plan(
     if potion_counts[random_color] >= 5:
         return []
 
-    # find pure barrel
+    # find pure barrel (isclose: JSON floats may not satisfy == 1)
+    idx = color_index[random_color]
     matching_barrels = [
-        barrel for barrel in wholesale_catalog if barrel.potion_type[color_index[random_color]] == 1
+        barrel
+        for barrel in wholesale_catalog
+        if math.isclose(barrel.potion_type[idx], 1.0, rel_tol=0, abs_tol=1e-5)
     ]
 
     # dont buy if not pure barrel
