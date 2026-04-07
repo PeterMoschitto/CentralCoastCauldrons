@@ -6,7 +6,7 @@ from typing import List, Annotated
 from src.api import auth
 from src import database as db
 
-# Checkout must use these same values (see carts.checkout).
+# checkout must use these same values 
 SKU_PRICE_GOLD: dict[str, int] = {
     "RED_POTION": 30,
     "GREEN_POTION": 30,
@@ -29,7 +29,6 @@ class CatalogItem(BaseModel):
     )
 
 
-# Placeholder function, you will replace this with a database call
 def create_catalog() -> List[CatalogItem]:
     with db.engine.begin() as connection:
         row = connection.execute(

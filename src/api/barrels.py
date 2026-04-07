@@ -82,7 +82,7 @@ def post_deliver_barrels(barrels_delivered: List[Barrel], order_id: int):
             [{"gold_paid": delivery.gold_paid}],
         )
 
-        # add ml for each barrel (float-safe; strict == 1 can miss JSON 1.0)
+        # add ml for each barrel
         for barrel in barrels_delivered:
             total_ml = barrel.ml_per_barrel * barrel.quantity
             col = _ml_column_for_pure_barrel(barrel)
@@ -133,7 +133,7 @@ def create_barrel_plan(
     if potion_counts[random_color] >= 5:
         return []
 
-    # find pure barrel (isclose: JSON floats may not satisfy == 1)
+    # find pure barrel 
     idx = color_index[random_color]
     matching_barrels = [
         barrel

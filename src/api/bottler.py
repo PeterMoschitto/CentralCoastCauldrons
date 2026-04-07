@@ -86,8 +86,8 @@ def create_bottle_plan(
     blue_ml: int,
 ) -> List[PotionMixes]:
     """
-    Version 1: mix all available ml into red, green, and blue potions respectively
-    (100 ml per potion). Do not cap by bottle capacity here—that is a later assignment.
+    Version 1: mix all available ml into red, green, and blue potions respectively, 
+    100 ml per potion
     """
     plan: List[PotionMixes] = []
 
@@ -126,7 +126,7 @@ def create_bottle_plan(
 def get_bottle_plan():
     """
     Gets the plan for bottling potions.
-    Each bottle has a quantity of what proportion of red, green, blue, and dark potions to add.
+    Each bottle has a quantity of what proportion of red, green, and blue potions to add.
     Colors are expressed in integers from 0 to 100 that must sum up to exactly 100.
     """
 
