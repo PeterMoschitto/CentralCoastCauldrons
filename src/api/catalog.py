@@ -1,9 +1,8 @@
 import sqlalchemy
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
 from typing import List, Annotated
 
-from src.api import auth
 from src import database as db
 
 # checkout must use these same values 
@@ -13,7 +12,7 @@ SKU_PRICE_GOLD: dict[str, int] = {
     "BLUE_POTION": 30,
 }
 
-router = APIRouter(dependencies=[Depends(auth.get_api_key)])
+router = APIRouter()
 
 
 class CatalogItem(BaseModel):
