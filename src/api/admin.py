@@ -27,7 +27,6 @@ def reset():
                     red_ml = 0,
                     green_ml = 0,
                     blue_ml = 0,
-                    dark_ml = 0,
                     red_potions = 0,
                     green_potions = 0,
                     blue_potions = 0
