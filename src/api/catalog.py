@@ -7,9 +7,9 @@ from src import database as db
 
 # checkout must use these same values 
 SKU_PRICE_GOLD: dict[str, int] = {
-    "RED_POTION": 30,
-    "GREEN_POTION": 30,
-    "BLUE_POTION": 30,
+    "RED_POTION": 45,
+    "GREEN_POTION": 45,
+    "BLUE_POTION": 45,
 }
 
 router = APIRouter()
