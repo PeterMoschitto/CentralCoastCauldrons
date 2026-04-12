@@ -32,7 +32,7 @@ def test_barrel_delivery() -> None:
     assert delivery_summary.gold_paid == 1750
 
 
-@patch("src.api.barrels.random.choice", return_value="red")
+@patch("src.api.barrels.random.choice", return_value=("red", 0))
 def test_buy_small_red_barrel_plan(_mock_choice) -> None:
     wholesale_catalog: List[Barrel] = [
         Barrel(
@@ -72,6 +72,7 @@ def test_buy_small_red_barrel_plan(_mock_choice) -> None:
         current_green_ml,
         current_blue_ml,
         current_dark_ml,
+        0,
         0,
         0,
         0,
@@ -127,9 +128,41 @@ def test_cant_afford_barrel_plan() -> None:
         0,
         0,
         0,
+        0,
         wholesale_catalog,
     )
 
     assert isinstance(barrel_orders, list)
     assert all(isinstance(order, BarrelOrder) for order in barrel_orders)
-    assert len(barrel_orders) == 0  # Ensure at least one order is generated
+    assert len(barrel_orders) == 0  # Cannot afford any barrel in catalog
+
+
+@patch("src.api.barrels.random.choice", return_value=("dark", 3))
+def test_buy_small_dark_barrel_plan(_mock_choice) -> None:
+    wholesale_catalog: List[Barrel] = [
+        Barrel(
+            sku="SMALL_DARK_BARREL",
+            ml_per_barrel=800,
+            potion_type=[0.0, 0.0, 0.0, 1.0],
+            price=120,
+            quantity=5,
+        ),
+    ]
+
+    barrel_orders = create_barrel_plan(
+        200,
+        10000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        wholesale_catalog,
+    )
+
+    assert len(barrel_orders) == 1
+    assert barrel_orders[0].sku == "SMALL_DARK_BARREL"
+    assert barrel_orders[0].quantity == 1

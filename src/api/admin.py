@@ -19,6 +19,9 @@ def reset():
 
     # Reset all potions and ml in database on game reset
     with db.engine.begin() as connection:
+        connection.execute(sqlalchemy.text("DELETE FROM cart_items"))
+        connection.execute(sqlalchemy.text("DELETE FROM carts"))
+        connection.execute(sqlalchemy.text("UPDATE potions SET quantity = 0"))
         connection.execute(
             sqlalchemy.text(
                 """
@@ -27,6 +30,7 @@ def reset():
                     red_ml = 0,
                     green_ml = 0,
                     blue_ml = 0,
+                    dark_ml = 0,
                     red_potions = 0,
                     green_potions = 0,
                     blue_potions = 0
