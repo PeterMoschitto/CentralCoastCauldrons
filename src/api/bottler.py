@@ -3,6 +3,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Sequence
 from src.api import auth
 import sqlalchemy
+from sqlalchemy.engine import Connection
 from src import database as db
 
 router = APIRouter(
@@ -10,6 +11,93 @@ router = APIRouter(
     tags=["bottler"],
     dependencies=[Depends(auth.get_api_key)],
 )
+
+# V2: Bottling only updates potions.quantity
+# Planning reads recipes from the potions table. If the table is empty, we merge in _PURE_RECIPES
+# below so the first ticks can still bottle pure colors from raw ml; deliver() INSERTs new rows
+# for any mix. After that, behavior is driven by DB rows.
+_PURE_RECIPES: tuple[tuple[int, int, int, int], ...] = (
+    (100, 0, 0, 0),
+    (0, 100, 0, 0),
+    (0, 0, 100, 0),
+    (0, 0, 0, 100),
+)
+
+_DEFAULT_PRICE = 50
+
+
+def _sku_for_recipe(r: int, g: int, b: int, d: int) -> str:
+    """deterministic SKU for [r,g,b,d]; must match catalog pattern"""
+    s = f"r{r}g{g}b{b}d{d}"
+    if len(s) <= 20:
+        return s
+    return f"m{r:02d}{g:02d}{b:02d}{d:02d}"
+
+
+def _catalog_recipes_for_planning(connection: Connection) -> list[tuple[int, int, int, int]]:
+    rows = connection.execute(
+        sqlalchemy.text(
+            """
+            SELECT red_pct, green_pct, blue_pct, dark_pct
+            FROM potions
+            ORDER BY id
+            """
+        )
+    ).fetchall()
+    seen: set[tuple[int, int, int, int]] = set()
+    out: list[tuple[int, int, int, int]] = []
+    for row in rows:
+        t = (row.red_pct, row.green_pct, row.blue_pct, row.dark_pct)
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    for t in _PURE_RECIPES:
+        if t not in seen:
+            out.append(t)
+            seen.add(t)
+    return out
+
+
+def _ensure_potion_row(
+    connection: Connection, r: int, g: int, b: int, d: int
+) -> int:
+    """return potions.id for this recipe, inserting a new catalog row if needed."""
+    existing = connection.execute(
+        sqlalchemy.text(
+            """
+            SELECT id FROM potions
+            WHERE red_pct = :r AND green_pct = :g AND blue_pct = :b AND dark_pct = :d
+            LIMIT 1
+            """
+        ),
+        {"r": r, "g": g, "b": b, "d": d},
+    ).one_or_none()
+    if existing is not None:
+        return int(existing.id)
+
+    sku = _sku_for_recipe(r, g, b, d)
+    name = f"{r}/{g}/{b}/{d}"
+    return int(
+        connection.execute(
+            sqlalchemy.text(
+                """
+                INSERT INTO potions (sku, name, price, red_pct, green_pct, blue_pct, dark_pct, quantity)
+                VALUES (:sku, :name, :price, :r, :g, :b, :d, 0)
+                RETURNING id
+                """
+            ),
+            {
+                "sku": sku,
+                "name": name,
+                "price": _DEFAULT_PRICE,
+                "r": r,
+                "g": g,
+                "b": b,
+                "d": d,
+            },
+        ).scalar_one()
+    )
+
 
 class PotionMixes(BaseModel):
     potion_type: List[int] = Field(
@@ -108,21 +196,7 @@ def post_deliver_bottles(potions_delivered: List[PotionMixes], order_id: int):
             blue_ml_used = q * b
             dark_ml_used = q * d
 
-            potion_row = connection.execute(
-                sqlalchemy.text(
-                    """
-                    SELECT id FROM potions
-                    WHERE red_pct = :r AND green_pct = :g AND blue_pct = :b AND dark_pct = :d
-                    LIMIT 1
-                    """
-                ),
-                {"r": r, "g": g, "b": b, "d": d},
-            ).one_or_none()
-            if potion_row is None:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No catalog potion matches this mix",
-                )
+            potion_id = _ensure_potion_row(connection, r, g, b, d)
 
             inv_result = connection.execute(
                 sqlalchemy.text(
@@ -157,7 +231,7 @@ def post_deliver_bottles(potions_delivered: List[PotionMixes], order_id: int):
                     WHERE id = :potion_id
                     """
                 ),
-                {"q": q, "potion_id": potion_row.id},
+                {"q": q, "potion_id": potion_id},
             )
 
 
@@ -179,19 +253,7 @@ def get_bottle_plan():
             )
         ).one()
 
-        catalog_rows = connection.execute(
-            sqlalchemy.text(
-                """
-                SELECT red_pct, green_pct, blue_pct, dark_pct
-                FROM potions
-                ORDER BY id
-                """
-            )
-        ).fetchall()
-
-    catalog = [
-        (r.red_pct, r.green_pct, r.blue_pct, r.dark_pct) for r in catalog_rows
-    ]
+        catalog = _catalog_recipes_for_planning(connection)
 
     return create_bottle_plan(
         red_ml=row.red_ml,
@@ -203,4 +265,4 @@ def get_bottle_plan():
 
 
 if __name__ == "__main__":
-    print(get_bottle_plan())
+    pass

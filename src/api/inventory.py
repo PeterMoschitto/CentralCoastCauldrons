@@ -74,5 +74,4 @@ def deliver_capacity_plan(capacity_purchase: CapacityPlan, order_id: int):
     - Start with 1 capacity for 50 potions and 1 capacity for 10,000 ml of potion.
     - Each additional capacity unit costs 1000 gold.
     """
-    print(f"capacity delivered: {capacity_purchase} order_id: {order_id}")
     pass

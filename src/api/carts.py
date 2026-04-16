@@ -94,7 +94,6 @@ def post_visits(visit_id: int, customers: List[Customer]):
     """
     Shares the customers that visited the store on that tick.
     """
-    print(customers)
     pass
 
 

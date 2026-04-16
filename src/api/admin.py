@@ -17,7 +17,7 @@ def reset():
     inventory, and all barrels are removed from inventory. Carts are all reset.
     """
 
-    # Reset all potions and ml in database on game reset
+    # columns on global_inventory are zeroed for consistency with older schema.
     with db.engine.begin() as connection:
         connection.execute(sqlalchemy.text("DELETE FROM cart_items"))
         connection.execute(sqlalchemy.text("DELETE FROM carts"))
