@@ -161,29 +161,39 @@ def create_barrel_plan(
     return []
 
 
+def _null_sum_to_int(value: object) -> int:
+    """SUM with no matching rows is NULL in SQL; treat as 0 for barrel logic."""
+    return 0 if value is None else int(value)
+
+
 def _pure_potion_bottle_counts(connection: Connection) -> tuple[int, int, int, int]:
-    """Bottled counts for pure R/G/B/D recipes from the potions table """
+    """Bottled counts for pure R/G/B/D recipes from the potions table."""
     row = connection.execute(
         sqlalchemy.text(
             """
             SELECT
-                COALESCE(SUM(quantity) FILTER (
+                SUM(quantity) FILTER (
                     WHERE red_pct = 100 AND green_pct = 0 AND blue_pct = 0 AND dark_pct = 0
-                ), 0) AS pure_red,
-                COALESCE(SUM(quantity) FILTER (
+                ) AS pure_red,
+                SUM(quantity) FILTER (
                     WHERE red_pct = 0 AND green_pct = 100 AND blue_pct = 0 AND dark_pct = 0
-                ), 0) AS pure_green,
-                COALESCE(SUM(quantity) FILTER (
+                ) AS pure_green,
+                SUM(quantity) FILTER (
                     WHERE red_pct = 0 AND green_pct = 0 AND blue_pct = 100 AND dark_pct = 0
-                ), 0) AS pure_blue,
-                COALESCE(SUM(quantity) FILTER (
+                ) AS pure_blue,
+                SUM(quantity) FILTER (
                     WHERE red_pct = 0 AND green_pct = 0 AND blue_pct = 0 AND dark_pct = 100
-                ), 0) AS pure_dark
+                ) AS pure_dark
             FROM potions
             """
         )
-    ).one()
-    return (int(row.pure_red), int(row.pure_green), int(row.pure_blue), int(row.pure_dark))
+    ).mappings().one()
+    return (
+        _null_sum_to_int(row["pure_red"]),
+        _null_sum_to_int(row["pure_green"]),
+        _null_sum_to_int(row["pure_blue"]),
+        _null_sum_to_int(row["pure_dark"]),
+    )
 
 
 @router.post("/plan", response_model=List[BarrelOrder])
