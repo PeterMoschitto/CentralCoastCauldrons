@@ -11,7 +11,7 @@ def summarize_checkout_totals(lines: Sequence[tuple[int, int]]) -> tuple[int, in
     """
     Compute checkout totals from cart lines.
 
-    Each line is (quantity, unit_price_in_gold). Returns
+    Each line is (quantity, unit_price_in_gold). Returns:
     (total_potions_bought, total_gold_paid).
     """
     total_potions = sum(qty for qty, _ in lines)
@@ -20,14 +20,19 @@ def summarize_checkout_totals(lines: Sequence[tuple[int, int]]) -> tuple[int, in
 
 
 def has_insufficient_stock(lines: Sequence[tuple[int, int]]) -> bool:
-    """Each line is (line_quantity, stock_on_hand). True if any line exceeds stock."""
+    """
+    Each line is (line_quantity, stock_on_hand).
+    Returns True if any requested line quantity exceeds stock.
+    """
     return any(qty > stock for qty, stock in lines)
+
 
 router = APIRouter(
     prefix="/carts",
     tags=["cart"],
     dependencies=[Depends(auth.get_api_key)],
 )
+
 
 class SearchSortOptions(str, Enum):
     customer_name = "customer_name"
@@ -65,20 +70,15 @@ def search_orders(
 ):
     """
     Search for cart line items by customer name and/or potion sku.
+    Placeholder implementation for now.
     """
-    return SearchResponse(
-        previous=None,
-        next=None,
-        results=[
-            LineItem(
-                line_item_id=1,
-                item_sku="1 oblivion potion",
-                customer_name="Scaramouche",
-                line_item_total=50,
-                timestamp="2021-01-01T00:00:00Z",
-            )
-        ],
-    )
+    _ = customer_name
+    _ = potion_sku
+    _ = search_page
+    _ = sort_col
+    _ = sort_order
+
+    return SearchResponse(previous=None, next=None, results=[])
 
 
 class Customer(BaseModel):
@@ -94,7 +94,9 @@ def post_visits(visit_id: int, customers: List[Customer]):
     """
     Shares the customers that visited the store on that tick.
     """
-    pass
+    _ = visit_id
+    _ = customers
+    return
 
 
 class CartCreateResponse(BaseModel):
@@ -121,7 +123,7 @@ def create_cart(new_cart: Customer):
             },
         ).scalar_one()
 
-    return CartCreateResponse(cart_id=cart_id)
+    return CartCreateResponse(cart_id=int(cart_id))
 
 
 class CartItem(BaseModel):
@@ -134,15 +136,17 @@ def set_item_quantity(cart_id: int, item_sku: str, cart_item: CartItem):
         cart_row = connection.execute(
             sqlalchemy.text(
                 """
-                SELECT id, checked_out 
-                FROM carts 
+                SELECT id, checked_out
+                FROM carts
                 WHERE id = :cart_id
                 """
             ),
             {"cart_id": cart_id},
         ).one_or_none()
+
         if cart_row is None:
             raise HTTPException(status_code=404, detail="Cart not found")
+
         if cart_row.checked_out:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -150,20 +154,28 @@ def set_item_quantity(cart_id: int, item_sku: str, cart_item: CartItem):
             )
 
         potion_row = connection.execute(
-            sqlalchemy.text("SELECT id FROM potions WHERE sku = :sku"),
+            sqlalchemy.text(
+                """
+                SELECT id
+                FROM potions
+                WHERE sku = :sku
+                """
+            ),
             {"sku": item_sku},
         ).one_or_none()
+
         if potion_row is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Unknown item sku: {item_sku}",
             )
+
         potion_id = potion_row.id
 
         existing = connection.execute(
             sqlalchemy.text(
                 """
-                SELECT id 
+                SELECT id
                 FROM cart_items
                 WHERE cart_id = :cart_id AND potion_id = :potion_id
                 """
@@ -175,7 +187,7 @@ def set_item_quantity(cart_id: int, item_sku: str, cart_item: CartItem):
             connection.execute(
                 sqlalchemy.text(
                     """
-                    UPDATE cart_items 
+                    UPDATE cart_items
                     SET quantity = :quantity
                     WHERE id = :line_id
                     """
@@ -197,7 +209,7 @@ def set_item_quantity(cart_id: int, item_sku: str, cart_item: CartItem):
                 },
             )
 
-    return status.HTTP_204_NO_CONTENT
+    return
 
 
 class CheckoutResponse(BaseModel):
@@ -219,12 +231,18 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
     with db.engine.begin() as connection:
         cart_row = connection.execute(
             sqlalchemy.text(
-                "SELECT id, checked_out FROM carts WHERE id = :cart_id"
+                """
+                SELECT id, checked_out
+                FROM carts
+                WHERE id = :cart_id
+                """
             ),
             {"cart_id": cart_id},
         ).one_or_none()
+
         if cart_row is None:
             raise HTTPException(status_code=404, detail="Cart not found")
+
         if cart_row.checked_out:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -234,7 +252,10 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
         lines = connection.execute(
             sqlalchemy.text(
                 """
-                SELECT ci.quantity AS line_qty, p.id AS potion_id, p.price, p.quantity AS stock
+                SELECT ci.quantity AS line_qty,
+                       p.id AS potion_id,
+                       p.price AS price,
+                       p.quantity AS stock
                 FROM cart_items ci
                 JOIN potions p ON p.id = ci.potion_id
                 WHERE ci.cart_id = :cart_id
@@ -289,8 +310,8 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
         connection.execute(
             sqlalchemy.text(
                 """
-                UPDATE carts 
-                SET checked_out = true 
+                UPDATE carts
+                SET checked_out = true
                 WHERE id = :cart_id
                 """
             ),

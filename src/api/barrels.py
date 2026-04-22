@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 import math
-import random
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, field_validator
 from typing import List
@@ -16,14 +15,17 @@ router = APIRouter(
     dependencies=[Depends(auth.get_api_key)],
 )
 
-# Random wholesale target: which pure elixir line (red/green/blue/dark) to restock this tick.
-# Each entry is (name for messaging / counts, index into Barrel.potion_type for a pure barrel).
-PURE_BARREL_COLOR_CHOICES: tuple[tuple[str, int], ...] = (
-    ("red", 0),
-    ("green", 1),
-    ("blue", 2),
-    ("dark", 3),
-)
+# align barrel strat with bottler
+PURE_TARGET = 3
+MIXED_TARGET = 6
+
+# extra reserve so we do not run dry immediately after one bottling cycle.
+RAW_ML_RESERVE = {
+    "red": 200,
+    "green": 200,
+    "blue": 200,
+    "dark": 200,
+}
 
 
 class Barrel(BaseModel):
@@ -62,8 +64,15 @@ def calculate_barrel_summary(barrels: List[Barrel]) -> BarrelSummary:
     return BarrelSummary(gold_paid=sum(b.price * b.quantity for b in barrels))
 
 
+def is_mixed_recipe(recipe: tuple[int, int, int, int]) -> bool:
+    return sum(1 for pct in recipe if pct > 0) > 1
+
+
 def _ml_column_for_pure_barrel(barrel: Barrel) -> str | None:
-    """Pure-color wholesale barrels: one of r,g,b,d is 1.0. Use isclose so JSON floats match."""
+    """
+    Pure color wholesale barrels: exactly one of r,g,b,d is 1.0.
+    Return the matching global_inventory ml column.
+    """
     pt = barrel.potion_type
     for i, col in enumerate(("red_ml", "green_ml", "blue_ml", "dark_ml")):
         if math.isclose(pt[i], 1.0, rel_tol=0, abs_tol=1e-5):
@@ -71,39 +80,82 @@ def _ml_column_for_pure_barrel(barrel: Barrel) -> str | None:
     return None
 
 
-@router.post("/deliver/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
-def post_deliver_barrels(barrels_delivered: List[Barrel], order_id: int):
-    """
-    Processes barrels delivered based on the provided order_id. order_id is a unique value representing
-    a single delivery; the call is idempotent based on the order_id.
-    """
-    _ = order_id
+def _color_name_for_index(idx: int) -> str:
+    return ("red", "green", "blue", "dark")[idx]
 
-    delivery = calculate_barrel_summary(barrels_delivered)
 
-    with db.engine.begin() as connection:
-        connection.execute(
-            sqlalchemy.text(
-                """
-                UPDATE global_inventory SET
-                gold = gold - :gold_paid
-                """
-            ),
-            [{"gold_paid": delivery.gold_paid}],
+def _pure_barrels_by_color(wholesale_catalog: List[Barrel], color_idx: int) -> List[Barrel]:
+    return [
+        barrel
+        for barrel in wholesale_catalog
+        if math.isclose(barrel.potion_type[color_idx], 1.0, rel_tol=0, abs_tol=1e-5)
+        and sum(1 for x in barrel.potion_type if x > 0) == 1
+    ]
+
+
+def _target_for_recipe(recipe: tuple[int, int, int, int]) -> int:
+    return MIXED_TARGET if is_mixed_recipe(recipe) else PURE_TARGET
+
+
+def _ingredient_shortfalls(
+    connection: Connection,
+    current_red_ml: int,
+    current_green_ml: int,
+    current_blue_ml: int,
+    current_dark_ml: int,
+) -> dict[str, int]:
+    """
+    Compute how short we are on raw ml by looking at all potion recipes
+    and how far below target stock they are.
+
+    For each potion recipe:
+      needed_bottles = max(0, target - current_quantity)
+      ingredient demand += needed_bottles * recipe_pct
+
+    Then compare required raw ml to current raw ml.
+    """
+    rows = connection.execute(
+        sqlalchemy.text(
+            """
+            SELECT red_pct, green_pct, blue_pct, dark_pct, quantity
+            FROM potions
+            """
         )
+    ).fetchall()
 
-        # add ml for each barrel
-        for barrel in barrels_delivered:
-            total_ml = barrel.ml_per_barrel * barrel.quantity
-            col = _ml_column_for_pure_barrel(barrel)
-            if col is None:
-                continue
-            connection.execute(
-                sqlalchemy.text(
-                    f"UPDATE global_inventory SET {col} = {col} + :ml"
-                ),
-                {"ml": total_ml},
-            )
+    required_red = 0
+    required_green = 0
+    required_blue = 0
+    required_dark = 0
+
+    for row in rows:
+        recipe = (row.red_pct, row.green_pct, row.blue_pct, row.dark_pct)
+        target = _target_for_recipe(recipe)
+        needed_bottles = max(0, target - row.quantity)
+
+        required_red += needed_bottles * row.red_pct
+        required_green += needed_bottles * row.green_pct
+        required_blue += needed_bottles * row.blue_pct
+        required_dark += needed_bottles * row.dark_pct
+
+    desired = {
+        "red": required_red + RAW_ML_RESERVE["red"],
+        "green": required_green + RAW_ML_RESERVE["green"],
+        "blue": required_blue + RAW_ML_RESERVE["blue"],
+        "dark": required_dark + RAW_ML_RESERVE["dark"],
+    }
+
+    current = {
+        "red": current_red_ml,
+        "green": current_green_ml,
+        "blue": current_blue_ml,
+        "dark": current_dark_ml,
+    }
+
+    return {
+        color: max(0, desired[color] - current[color])
+        for color in ("red", "green", "blue", "dark")
+    }
 
 
 def create_barrel_plan(
@@ -113,94 +165,103 @@ def create_barrel_plan(
     current_green_ml: int,
     current_blue_ml: int,
     current_dark_ml: int,
-    current_red_potions: int,
-    current_green_potions: int,
-    current_blue_potions: int,
-    current_dark_potions: int,
     wholesale_catalog: List[Barrel],
+    *,
+    connection: Connection,
 ) -> List[BarrelOrder]:
     """
-    Pick a random elixir color (red, green, blue, or dark), then buy the smallest
-    affordable pure barrel of that color if we hold fewer than 5 bottled potions
-    of that pure type (counts are per-recipe from the potions table).
+    Buy the cheapest affordable pure barrel for the color with the largest raw ml shortfall.
+    Shortfall is driven by potion recipes + current potion inventory in the potions table.
     """
-    _ = (
-        max_barrel_capacity,
-        current_red_ml,
-        current_green_ml,
-        current_blue_ml,
-        current_dark_ml,
+    current_total_ml = current_red_ml + current_green_ml + current_blue_ml + current_dark_ml
+    remaining_capacity = max_barrel_capacity - current_total_ml
+
+    if remaining_capacity <= 0:
+        return []
+
+    shortfalls = _ingredient_shortfalls(
+        connection,
+        current_red_ml=current_red_ml,
+        current_green_ml=current_green_ml,
+        current_blue_ml=current_blue_ml,
+        current_dark_ml=current_dark_ml,
     )
 
-    potion_counts = {
-        "red": current_red_potions,
-        "green": current_green_potions,
-        "blue": current_blue_potions,
-        "dark": current_dark_potions,
-    }
+    # highest shortage first
+    color_priority = sorted(
+        shortfalls.items(),
+        key=lambda item: item[1],
+        reverse=True,
+    )
 
-    color_name, idx = random.choice(PURE_BARREL_COLOR_CHOICES)
+    for color_name, shortfall in color_priority:
+        if shortfall <= 0:
+            continue
 
-    if potion_counts[color_name] >= 5:
-        return []
+        color_idx = {"red": 0, "green": 1, "blue": 2, "dark": 3}[color_name]
+        candidates = _pure_barrels_by_color(wholesale_catalog, color_idx)
 
-    matching_barrels = [
-        barrel
-        for barrel in wholesale_catalog
-        if math.isclose(barrel.potion_type[idx], 1.0, rel_tol=0, abs_tol=1e-5)
-    ]
+        if not candidates:
+            continue
 
-    if not matching_barrels:
-        return []
+        # prefer the smallest affordable barrel that fits capacity
+        affordable = [
+            barrel
+            for barrel in candidates
+            if barrel.price <= gold and barrel.ml_per_barrel <= remaining_capacity
+        ]
+        if not affordable:
+            continue
 
-    small_barrel = min(matching_barrels, key=lambda b: b.ml_per_barrel)
-
-    if small_barrel.price <= gold:
-        return [BarrelOrder(sku=small_barrel.sku, quantity=1)]
+        chosen = min(affordable, key=lambda b: (b.ml_per_barrel, b.price))
+        return [BarrelOrder(sku=chosen.sku, quantity=1)]
 
     return []
 
 
-def _null_sum_to_int(value: object) -> int:
-    """SUM with no matching rows is NULL in SQL; treat as 0 for barrel logic."""
-    return 0 if value is None else int(value)
+@router.post("/deliver/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
+def post_deliver_barrels(barrels_delivered: List[Barrel], order_id: int):
+    """
+    Record delivered barrels:
+    - subtract gold
+    - add raw ml for pure-color barrels
+    """
+    _ = order_id
 
+    delivery = calculate_barrel_summary(barrels_delivered)
 
-def _pure_potion_bottle_counts(connection: Connection) -> tuple[int, int, int, int]:
-    """Bottled counts for pure R/G/B/D recipes from the potions table."""
-    row = connection.execute(
-        sqlalchemy.text(
-            """
-            SELECT
-                SUM(quantity) FILTER (
-                    WHERE red_pct = 100 AND green_pct = 0 AND blue_pct = 0 AND dark_pct = 0
-                ) AS pure_red,
-                SUM(quantity) FILTER (
-                    WHERE red_pct = 0 AND green_pct = 100 AND blue_pct = 0 AND dark_pct = 0
-                ) AS pure_green,
-                SUM(quantity) FILTER (
-                    WHERE red_pct = 0 AND green_pct = 0 AND blue_pct = 100 AND dark_pct = 0
-                ) AS pure_blue,
-                SUM(quantity) FILTER (
-                    WHERE red_pct = 0 AND green_pct = 0 AND blue_pct = 0 AND dark_pct = 100
-                ) AS pure_dark
-            FROM potions
-            """
+    with db.engine.begin() as connection:
+        connection.execute(
+            sqlalchemy.text(
+                """
+                UPDATE global_inventory
+                SET gold = gold - :gold_paid
+                """
+            ),
+            {"gold_paid": delivery.gold_paid},
         )
-    ).mappings().one()
-    return (
-        _null_sum_to_int(row["pure_red"]),
-        _null_sum_to_int(row["pure_green"]),
-        _null_sum_to_int(row["pure_blue"]),
-        _null_sum_to_int(row["pure_dark"]),
-    )
+
+        for barrel in barrels_delivered:
+            total_ml = barrel.ml_per_barrel * barrel.quantity
+            col = _ml_column_for_pure_barrel(barrel)
+            if col is None:
+                continue
+
+            connection.execute(
+                sqlalchemy.text(
+                    f"""
+                    UPDATE global_inventory
+                    SET {col} = {col} + :ml
+                    """
+                ),
+                {"ml": total_ml},
+            )
 
 
 @router.post("/plan", response_model=List[BarrelOrder])
 def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
     """
-    Gets the plan for purchasing wholesale barrels. The call passes in a catalog of available barrels
-    and the shop returns back which barrels they'd like to purchase and how many.
+    Gets the plan for purchasing wholesale barrels.
     """
     with db.engine.begin() as connection:
         row = connection.execute(
@@ -212,20 +273,13 @@ def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
             )
         ).one()
 
-        pure_red, pure_green, pure_blue, pure_dark = _pure_potion_bottle_counts(
-            connection
+        return create_barrel_plan(
+            gold=row.gold,
+            max_barrel_capacity=10000,
+            current_red_ml=row.red_ml,
+            current_green_ml=row.green_ml,
+            current_blue_ml=row.blue_ml,
+            current_dark_ml=row.dark_ml,
+            wholesale_catalog=wholesale_catalog,
+            connection=connection,
         )
-
-    return create_barrel_plan(
-        gold=row.gold,
-        max_barrel_capacity=10000,
-        current_red_ml=row.red_ml,
-        current_green_ml=row.green_ml,
-        current_blue_ml=row.blue_ml,
-        current_dark_ml=row.dark_ml,
-        current_red_potions=pure_red,
-        current_green_potions=pure_green,
-        current_blue_potions=pure_blue,
-        current_dark_potions=pure_dark,
-        wholesale_catalog=wholesale_catalog,
-    )

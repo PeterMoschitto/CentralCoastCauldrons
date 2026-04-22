@@ -5,7 +5,6 @@ from typing import List, Annotated
 
 from src import database as db
 
-
 router = APIRouter()
 
 
@@ -22,6 +21,13 @@ class CatalogItem(BaseModel):
     )
 
 
+def is_mixed_potion(row) -> bool:
+    nonzero_parts = sum(
+        1 for pct in [row.red_pct, row.green_pct, row.blue_pct, row.dark_pct] if pct > 0
+    )
+    return nonzero_parts > 1
+
+
 def create_catalog() -> List[CatalogItem]:
     with db.engine.begin() as connection:
         rows = connection.execute(
@@ -34,24 +40,23 @@ def create_catalog() -> List[CatalogItem]:
             )
         ).fetchall()
 
-    catalog: List[CatalogItem] = []
+    rows = sorted(rows, key=lambda row: (not is_mixed_potion(row), row.name))
 
-    for row in rows:
-        catalog.append(
-            CatalogItem(
-                sku=row.sku,
-                name=row.name,
-                quantity=row.quantity,
-                price=row.price,
-                potion_type=[
-                    row.red_pct,
-                    row.green_pct,
-                    row.blue_pct,
-                    row.dark_pct,
-                ],                
-            )
+    return [
+        CatalogItem(
+            sku=row.sku,
+            name=row.name,
+            quantity=row.quantity,
+            price=row.price,
+            potion_type=[
+                row.red_pct,
+                row.green_pct,
+                row.blue_pct,
+                row.dark_pct,
+            ],
         )
-    return catalog
+        for row in rows
+    ]
 
 
 @router.get("/catalog/", tags=["catalog"], response_model=List[CatalogItem])

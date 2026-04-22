@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 import sqlalchemy
+
 from src.api import auth
 from src import database as db
 
@@ -21,7 +22,13 @@ class CapacityPlan(BaseModel):
     potion_capacity: int = Field(
         ge=0, le=10, description="Potion capacity units, max 10"
     )
-    ml_capacity: int = Field(ge=0, le=10, description="ML capacity units, max 10")
+    ml_capacity: int = Field(
+        ge=0, le=10, description="ML capacity units, max 10"
+    )
+
+
+def _null_sum_to_int(value: object) -> int:
+    return 0 if value is None else int(value)
 
 
 @router.get("/audit", response_model=InventoryAudit)
@@ -31,7 +38,6 @@ def get_inventory():
     what is reported here and my source of truth will be posted
     as errors on potion exchange.
     """
-
     with db.engine.begin() as connection:
         row = connection.execute(
             sqlalchemy.text(
@@ -41,10 +47,17 @@ def get_inventory():
                 """
             )
         ).one()
+
         total_qty = connection.execute(
-            sqlalchemy.text("SELECT SUM(quantity) FROM potions")
+            sqlalchemy.text(
+                """
+                SELECT SUM(quantity)
+                FROM potions
+                """
+            )
         ).scalar_one()
-        number_of_potions = 0 if total_qty is None else int(total_qty)
+
+    number_of_potions = _null_sum_to_int(total_qty)
     ml_in_barrels = row.red_ml + row.green_ml + row.blue_ml + row.dark_ml
 
     return InventoryAudit(
@@ -74,4 +87,6 @@ def deliver_capacity_plan(capacity_purchase: CapacityPlan, order_id: int):
     - Start with 1 capacity for 50 potions and 1 capacity for 10,000 ml of potion.
     - Each additional capacity unit costs 1000 gold.
     """
-    pass
+    _ = capacity_purchase
+    _ = order_id
+    return
