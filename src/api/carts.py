@@ -1,7 +1,15 @@
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 import sqlalchemy
 from src.api import auth
+from src.api.ledger import (
+    add_ledger_entry,
+    create_inventory_transaction,
+    get_potion_balance,
+    get_processed_response,
+    store_processed_response,
+)
 from enum import Enum
 from typing import List, Optional, Sequence
 from src import database as db
@@ -112,14 +120,29 @@ def create_cart(new_cart: Customer):
         cart_id = connection.execute(
             sqlalchemy.text(
                 """
-                INSERT INTO carts (customer_id, customer_name)
-                VALUES (:customer_id, :customer_name)
+                INSERT INTO carts (
+                    customer_id,
+                    customer_name,
+                    character_class,
+                    character_species,
+                    level
+                )
+                VALUES (
+                    :customer_id,
+                    :customer_name,
+                    :character_class,
+                    :character_species,
+                    :level
+                )
                 RETURNING id
                 """
             ),
             {
                 "customer_id": new_cart.customer_id,
                 "customer_name": new_cart.customer_name,
+                "character_class": new_cart.character_class,
+                "character_species": new_cart.character_species,
+                "level": new_cart.level,
             },
         ).scalar_one()
 
@@ -225,14 +248,30 @@ class CartCheckout(BaseModel):
 def checkout(cart_id: int, cart_checkout: CartCheckout):
     """
     Handles the checkout process for a specific cart.
+
+    V3:
+    - reads potion stock from the ledger
+    - writes potion and gold changes to the ledger
+    - logs sale_events
+    - is idempotent by cart_id
     """
     _ = cart_checkout
 
     with db.engine.begin() as connection:
+        cached = get_processed_response(connection, str(cart_id), "checkout")
+        if cached is not None:
+            return CheckoutResponse(**cached)
+
         cart_row = connection.execute(
             sqlalchemy.text(
                 """
-                SELECT id, checked_out
+                SELECT id,
+                        checked_out,
+                        customer_id,
+                        customer_name,
+                        character_class,
+                        character_species,
+                        level
                 FROM carts
                 WHERE id = :cart_id
                 """
@@ -254,8 +293,8 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
                 """
                 SELECT ci.quantity AS line_qty,
                        p.id AS potion_id,
-                       p.price AS price,
-                       p.quantity AS stock
+                       p.sku AS sku,
+                       p.price AS price
                 FROM cart_items ci
                 JOIN potions p ON p.id = ci.potion_id
                 WHERE ci.cart_id = :cart_id
@@ -270,42 +309,96 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
                 detail="Cart has no items",
             )
 
-        total_potions_bought, total_gold_paid = summarize_checkout_totals(
-            [(row.line_qty, row.price) for row in lines]
-        )
+        stock_lines = [
+            (row.line_qty, get_potion_balance(connection, row.sku))
+            for row in lines
+        ]
 
-        if has_insufficient_stock([(row.line_qty, row.stock) for row in lines]):
+        if has_insufficient_stock(stock_lines):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Not enough stock for one or more items in this cart",
             )
 
+        total_potions_bought, total_gold_paid = summarize_checkout_totals(
+            [(row.line_qty, row.price) for row in lines]
+        )
+
+        transaction_id = create_inventory_transaction(
+            connection,
+            "checkout",
+            f"checkout cart {cart_id}",
+        )
+
+        # Ledger entries: potions decrease, gold increases
         for row in lines:
-            result = connection.execute(
+            add_ledger_entry(
+                connection,
+                transaction_id,
+                "potion",
+                row.sku,
+                -row.line_qty,
+            )
+
+        add_ledger_entry(
+            connection,
+            transaction_id,
+            "gold",
+            "gold",
+            total_gold_paid,
+        )
+
+        # Sale instrumentation
+        now = datetime.utcnow()
+        sold_day = now.strftime("%A")
+        sold_hour = now.hour
+
+        for row in lines:
+            connection.execute(
                 sqlalchemy.text(
                     """
-                    UPDATE potions
-                    SET quantity = quantity - :sold
-                    WHERE id = :potion_id AND quantity >= :sold
+                    INSERT INTO sale_events (
+                        inventory_transaction_id,
+                        customer_id,
+                        customer_name,
+                        character_class,
+                        character_species,
+                        level,
+                        potion_sku,
+                        quantity,
+                        unit_price,
+                        sold_day,
+                        sold_hour
+                    )
+                    VALUES (
+                        :inventory_transaction_id,
+                        :customer_id,
+                        :customer_name,
+                        :character_class,
+                        :character_species,
+                        :level,
+                        :potion_sku,
+                        :quantity,
+                        :unit_price,
+                        :sold_day,
+                        :sold_hour
+                    )
                     """
                 ),
-                {"sold": row.line_qty, "potion_id": row.potion_id},
+                {
+                    "inventory_transaction_id": transaction_id,
+                    "customer_id": cart_row.customer_id,
+                    "customer_name": cart_row.customer_name,
+                    "character_class": cart_row.character_class,
+                    "character_species": cart_row.character_species,
+                    "level": cart_row.level,
+                    "potion_sku": row.sku,
+                    "quantity": row.line_qty,
+                    "unit_price": row.price,
+                    "sold_day": sold_day,
+                    "sold_hour": sold_hour,
+                },
             )
-            if result.rowcount != 1:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Not enough stock for one or more items in this cart",
-                )
-
-        connection.execute(
-            sqlalchemy.text(
-                """
-                UPDATE global_inventory
-                SET gold = gold + :gold_paid
-                """
-            ),
-            {"gold_paid": total_gold_paid},
-        )
 
         connection.execute(
             sqlalchemy.text(
@@ -318,7 +411,11 @@ def checkout(cart_id: int, cart_checkout: CartCheckout):
             {"cart_id": cart_id},
         )
 
-    return CheckoutResponse(
-        total_potions_bought=total_potions_bought,
-        total_gold_paid=total_gold_paid,
-    )
+        response = {
+            "total_potions_bought": total_potions_bought,
+            "total_gold_paid": total_gold_paid,
+        }
+
+        store_processed_response(connection, str(cart_id), "checkout", response)
+
+    return CheckoutResponse(**response)

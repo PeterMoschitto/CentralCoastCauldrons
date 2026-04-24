@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from typing import List, Annotated
 
 from src import database as db
+from src.api.ledger import get_potion_balance
 
 router = APIRouter()
 
@@ -33,30 +34,38 @@ def create_catalog() -> List[CatalogItem]:
         rows = connection.execute(
             sqlalchemy.text(
                 """
-                SELECT sku, name, price, quantity, red_pct, green_pct, blue_pct, dark_pct
+                SELECT sku, name, price, red_pct, green_pct, blue_pct, dark_pct
                 FROM potions
-                WHERE quantity > 0
                 """
             )
         ).fetchall()
 
-    rows = sorted(rows, key=lambda row: (not is_mixed_potion(row), row.name))
+        rows = sorted(rows, key=lambda row: (not is_mixed_potion(row), row.name))
 
-    return [
-        CatalogItem(
-            sku=row.sku,
-            name=row.name,
-            quantity=row.quantity,
-            price=row.price,
-            potion_type=[
-                row.red_pct,
-                row.green_pct,
-                row.blue_pct,
-                row.dark_pct,
-            ],
-        )
-        for row in rows
-    ]
+        catalog: List[CatalogItem] = []
+
+        for row in rows:
+            quantity = get_potion_balance(connection, row.sku)
+
+            if quantity <= 0:
+                continue
+
+            catalog.append(
+                CatalogItem(
+                    sku=row.sku,
+                    name=row.name,
+                    quantity=quantity,
+                    price=row.price,
+                    potion_type=[
+                        row.red_pct,
+                        row.green_pct,
+                        row.blue_pct,
+                        row.dark_pct,
+                    ],
+                )
+            )
+
+    return catalog
 
 
 @router.get("/catalog/", tags=["catalog"], response_model=List[CatalogItem])

@@ -7,6 +7,15 @@ from typing import List
 import sqlalchemy
 from sqlalchemy.engine import Connection
 from src.api import auth
+from src.api.ledger import (
+    add_ledger_entry,
+    create_inventory_transaction,
+    get_gold_balance,
+    get_ml_balance,
+    get_potion_balance,
+    get_processed_response,
+    store_processed_response,
+)
 from src import database as db
 
 router = APIRouter(
@@ -68,20 +77,16 @@ def is_mixed_recipe(recipe: tuple[int, int, int, int]) -> bool:
     return sum(1 for pct in recipe if pct > 0) > 1
 
 
-def _ml_column_for_pure_barrel(barrel: Barrel) -> str | None:
+def _resource_key_for_pure_barrel(barrel: Barrel) -> str | None:
     """
     Pure color wholesale barrels: exactly one of r,g,b,d is 1.0.
-    Return the matching global_inventory ml column.
+    Return the matching ledger ml resource key.
     """
     pt = barrel.potion_type
-    for i, col in enumerate(("red_ml", "green_ml", "blue_ml", "dark_ml")):
+    for i, color in enumerate(("red", "green", "blue", "dark")):
         if math.isclose(pt[i], 1.0, rel_tol=0, abs_tol=1e-5):
-            return col
+            return color
     return None
-
-
-def _color_name_for_index(idx: int) -> str:
-    return ("red", "green", "blue", "dark")[idx]
 
 
 def _pure_barrels_by_color(wholesale_catalog: List[Barrel], color_idx: int) -> List[Barrel]:
@@ -105,19 +110,13 @@ def _ingredient_shortfalls(
     current_dark_ml: int,
 ) -> dict[str, int]:
     """
-    Compute how short we are on raw ml by looking at all potion recipes
-    and how far below target stock they are.
-
-    For each potion recipe:
-      needed_bottles = max(0, target - current_quantity)
-      ingredient demand += needed_bottles * recipe_pct
-
-    Then compare required raw ml to current raw ml.
+    Compute raw-ml shortfalls from potion recipes in the potions table and
+    current potion stock from the ledger.
     """
     rows = connection.execute(
         sqlalchemy.text(
             """
-            SELECT red_pct, green_pct, blue_pct, dark_pct, quantity
+            SELECT sku, red_pct, green_pct, blue_pct, dark_pct
             FROM potions
             """
         )
@@ -130,8 +129,9 @@ def _ingredient_shortfalls(
 
     for row in rows:
         recipe = (row.red_pct, row.green_pct, row.blue_pct, row.dark_pct)
+        current_qty = get_potion_balance(connection, row.sku)
         target = _target_for_recipe(recipe)
-        needed_bottles = max(0, target - row.quantity)
+        needed_bottles = max(0, target - current_qty)
 
         required_red += needed_bottles * row.red_pct
         required_green += needed_bottles * row.green_pct
@@ -170,8 +170,9 @@ def create_barrel_plan(
     connection: Connection,
 ) -> List[BarrelOrder]:
     """
-    Buy the cheapest affordable pure barrel for the color with the largest raw ml shortfall.
-    Shortfall is driven by potion recipes + current potion inventory in the potions table.
+    Buy one affordable pure-color barrel for the color with the largest raw ml shortfall.
+    Of those options, pick the best wholesale value: lowest price per ml
+    (then largest ml if tied).
     """
     current_total_ml = current_red_ml + current_green_ml + current_blue_ml + current_dark_ml
     remaining_capacity = max_barrel_capacity - current_total_ml
@@ -187,7 +188,6 @@ def create_barrel_plan(
         current_dark_ml=current_dark_ml,
     )
 
-    # highest shortage first
     color_priority = sorted(
         shortfalls.items(),
         key=lambda item: item[1],
@@ -204,7 +204,6 @@ def create_barrel_plan(
         if not candidates:
             continue
 
-        # prefer the smallest affordable barrel that fits capacity
         affordable = [
             barrel
             for barrel in candidates
@@ -213,7 +212,10 @@ def create_barrel_plan(
         if not affordable:
             continue
 
-        chosen = min(affordable, key=lambda b: (b.ml_per_barrel, b.price))
+        chosen = min(
+            affordable,
+            key=lambda b: (b.price / b.ml_per_barrel, -b.ml_per_barrel),
+        )
         return [BarrelOrder(sku=chosen.sku, quantity=1)]
 
     return []
@@ -222,41 +224,56 @@ def create_barrel_plan(
 @router.post("/deliver/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
 def post_deliver_barrels(barrels_delivered: List[Barrel], order_id: int):
     """
-    Record delivered barrels:
+    V3:
+    Record delivered barrels in the ledger:
     - subtract gold
-    - add raw ml for pure-color barrels
-    """
-    _ = order_id
+    - add raw ml for pure color barrels
 
+    Idempotent by order_id.
+    """
     delivery = calculate_barrel_summary(barrels_delivered)
 
     with db.engine.begin() as connection:
-        connection.execute(
-            sqlalchemy.text(
-                """
-                UPDATE global_inventory
-                SET gold = gold - :gold_paid
-                """
-            ),
-            {"gold_paid": delivery.gold_paid},
+        cached = get_processed_response(connection, str(order_id), "barrel_delivery")
+        if cached is not None:
+            return
+
+        transaction_id = create_inventory_transaction(
+            connection,
+            "barrel_delivery",
+            f"barrel delivery order {order_id}",
         )
 
+        # Spend gold
+        add_ledger_entry(
+            connection,
+            transaction_id,
+            "gold",
+            "gold",
+            -delivery.gold_paid,
+        )
+
+        # Add ml for pure barrels
         for barrel in barrels_delivered:
             total_ml = barrel.ml_per_barrel * barrel.quantity
-            col = _ml_column_for_pure_barrel(barrel)
-            if col is None:
+            color = _resource_key_for_pure_barrel(barrel)
+            if color is None:
                 continue
 
-            connection.execute(
-                sqlalchemy.text(
-                    f"""
-                    UPDATE global_inventory
-                    SET {col} = {col} + :ml
-                    """
-                ),
-                {"ml": total_ml},
+            add_ledger_entry(
+                connection,
+                transaction_id,
+                "ml",
+                color,
+                total_ml,
             )
 
+        store_processed_response(
+            connection,
+            str(order_id),
+            "barrel_delivery",
+            {"status": "ok"},
+        )
 
 @router.post("/plan", response_model=List[BarrelOrder])
 def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
@@ -264,22 +281,19 @@ def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
     Gets the plan for purchasing wholesale barrels.
     """
     with db.engine.begin() as connection:
-        row = connection.execute(
-            sqlalchemy.text(
-                """
-                SELECT gold, red_ml, green_ml, blue_ml, dark_ml
-                FROM global_inventory
-                """
-            )
-        ).one()
+        gold = get_gold_balance(connection)
+        red_ml = get_ml_balance(connection, "red")
+        green_ml = get_ml_balance(connection, "green")
+        blue_ml = get_ml_balance(connection, "blue")
+        dark_ml = get_ml_balance(connection, "dark")
 
         return create_barrel_plan(
-            gold=row.gold,
+            gold=gold,
             max_barrel_capacity=10000,
-            current_red_ml=row.red_ml,
-            current_green_ml=row.green_ml,
-            current_blue_ml=row.blue_ml,
-            current_dark_ml=row.dark_ml,
+            current_red_ml=red_ml,
+            current_green_ml=green_ml,
+            current_blue_ml=blue_ml,
+            current_dark_ml=dark_ml,
             wholesale_catalog=wholesale_catalog,
             connection=connection,
         )

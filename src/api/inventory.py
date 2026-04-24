@@ -4,6 +4,7 @@ import sqlalchemy
 
 from src.api import auth
 from src import database as db
+from src.api.ledger import get_gold_balance, get_ml_balance, get_total_potions
 
 router = APIRouter(
     prefix="/inventory",
@@ -27,43 +28,27 @@ class CapacityPlan(BaseModel):
     )
 
 
-def _null_sum_to_int(value: object) -> int:
-    return 0 if value is None else int(value)
-
-
 @router.get("/audit", response_model=InventoryAudit)
 def get_inventory():
     """
-    Returns an audit of the current inventory. Any discrepancies between
+    Returns an audit of the current inventory USING LEDGER BALANCES. Any discrepancies between
     what is reported here and my source of truth will be posted
     as errors on potion exchange.
     """
     with db.engine.begin() as connection:
-        row = connection.execute(
-            sqlalchemy.text(
-                """
-                SELECT gold, red_ml, green_ml, blue_ml, dark_ml
-                FROM global_inventory
-                """
-            )
-        ).one()
+        gold = get_gold_balance(connection)
+        red_ml = get_ml_balance(connection, "red")
+        green_ml = get_ml_balance(connection, "green")
+        blue_ml = get_ml_balance(connection, "blue")
+        dark_ml = get_ml_balance(connection, "dark")
+        number_of_potions = get_total_potions(connection)
 
-        total_qty = connection.execute(
-            sqlalchemy.text(
-                """
-                SELECT SUM(quantity)
-                FROM potions
-                """
-            )
-        ).scalar_one()
-
-    number_of_potions = _null_sum_to_int(total_qty)
-    ml_in_barrels = row.red_ml + row.green_ml + row.blue_ml + row.dark_ml
+    ml_in_barrels = red_ml + green_ml + blue_ml + dark_ml
 
     return InventoryAudit(
         number_of_potions=number_of_potions,
         ml_in_barrels=ml_in_barrels,
-        gold=row.gold,
+        gold=gold,
     )
 
 

@@ -5,6 +5,14 @@ import sqlalchemy
 from sqlalchemy.engine import Connection
 
 from src.api import auth
+from src.api.ledger import (
+    add_ledger_entry,
+    create_inventory_transaction,
+    get_ml_balance,
+    get_potion_balance,
+    get_processed_response,
+    store_processed_response,
+)
 from src import database as db
 
 router = APIRouter(
@@ -14,8 +22,6 @@ router = APIRouter(
 )
 
 
-# Target inventory levels
-# Mixed potions get a higher target than pure potions
 PURE_TARGET = 3
 MIXED_TARGET = 6
 
@@ -40,12 +46,10 @@ class PotionMixes(BaseModel):
 
 
 def is_mixed_recipe(recipe: tuple[int, int, int, int]) -> bool:
-    """A recipe is mixed if more than one color component is nonzero."""
     return sum(1 for pct in recipe if pct > 0) > 1
 
 
 def uses_dark(recipe: tuple[int, int, int, int]) -> bool:
-    """Whether the recipe uses any dark liquid."""
     return recipe[3] > 0
 
 
@@ -59,10 +63,6 @@ def max_bottles_for_recipe(
     blue_ml: int,
     dark_ml: int,
 ) -> int:
-    """
-    Return the maximum number of 100 ml bottles that can be made for a recipe.
-    Recipe values are ml-per-bottle because the percentages sum to 100.
-    """
     limits: List[int] = []
 
     if r > 0:
@@ -82,54 +82,58 @@ def max_bottles_for_recipe(
 
 def _catalog_rows_for_planning(
     connection: Connection,
-) -> list[tuple[int, int, int, int, int]]:
+) -> list[tuple[str, int, int, int, int, int]]:
     """
-    Read potion recipes and current inventory from the potions table.
+    Read potion recipes from potions metadata and current inventory from the ledger.
 
     Returns rows as:
-        (red_pct, green_pct, blue_pct, dark_pct, current_quantity)
+        (sku, red_pct, green_pct, blue_pct, dark_pct, current_quantity)
     """
     rows = connection.execute(
         sqlalchemy.text(
             """
-            SELECT red_pct, green_pct, blue_pct, dark_pct, quantity
+            SELECT sku, red_pct, green_pct, blue_pct, dark_pct
             FROM potions
             ORDER BY id
             """
         )
     ).fetchall()
 
-    # Deduplicate by recipe 
     seen: set[tuple[int, int, int, int]] = set()
-    out: list[tuple[int, int, int, int, int]] = []
+    out: list[tuple[str, int, int, int, int, int]] = []
 
     for row in rows:
         recipe = (row.red_pct, row.green_pct, row.blue_pct, row.dark_pct)
-        if recipe not in seen:
-            seen.add(recipe)
-            out.append(
-                (
-                    row.red_pct,
-                    row.green_pct,
-                    row.blue_pct,
-                    row.dark_pct,
-                    row.quantity,
-                )
+        if recipe in seen:
+            continue
+
+        seen.add(recipe)
+        current_quantity = get_potion_balance(connection, row.sku)
+
+        out.append(
+            (
+                row.sku,
+                row.red_pct,
+                row.green_pct,
+                row.blue_pct,
+                row.dark_pct,
+                current_quantity,
             )
+        )
 
     return out
 
 
-def _potion_id_for_recipe(
+def _potion_sku_for_recipe(
     connection: Connection, r: int, g: int, b: int, d: int
-) -> int:
+) -> str:
     """
-    Return the existing potions.id for this recipe.
+    Return the existing potions.sku for this recipe.
     """
     row = connection.execute(
         sqlalchemy.text(
             """
-            SELECT id
+            SELECT sku
             FROM potions
             WHERE red_pct = :r
               AND green_pct = :g
@@ -147,7 +151,7 @@ def _potion_id_for_recipe(
             detail=f"No potion recipe exists for [{r}, {g}, {b}, {d}]",
         )
 
-    return int(row.id)
+    return str(row.sku)
 
 
 def create_bottle_plan(
@@ -156,18 +160,13 @@ def create_bottle_plan(
     blue_ml: int,
     dark_ml: int,
     *,
-    catalog: Sequence[tuple[int, int, int, int, int]],
+    catalog: Sequence[tuple[str, int, int, int, int, int]],
 ) -> List[PotionMixes]:
     """
     Bottle toward target inventory levels.
 
     Catalog rows are:
-        (red_pct, green_pct, blue_pct, dark_pct, current_quantity)
-
-    Strategy:
-    1. Prioritize mixed recipes before pure recipes
-    2. Among recipes of the same type, prioritize lower current stock first
-    3. Dark recipes fully supported and participate naturally
+        (sku, red_pct, green_pct, blue_pct, dark_pct, current_quantity)
     """
     r_stock, g_stock, b_stock, d_stock = red_ml, green_ml, blue_ml, dark_ml
     plan: List[PotionMixes] = []
@@ -175,14 +174,9 @@ def create_bottle_plan(
     def target_for_recipe(recipe: tuple[int, int, int, int]) -> int:
         return MIXED_TARGET if is_mixed_recipe(recipe) else PURE_TARGET
 
-    def sort_key(row: tuple[int, int, int, int, int]):
-        r, g, b, d, current_qty = row
+    def sort_key(row: tuple[str, int, int, int, int, int]):
+        _, r, g, b, d, current_qty = row
         recipe = (r, g, b, d)
-
-        # Sort order:
-        # mixed first, then pure
-        # lower current quantity first
-        # dark using mixed recipes slightly ahead of non dark mixed recipes
         return (
             not is_mixed_recipe(recipe),
             not uses_dark(recipe),
@@ -191,7 +185,7 @@ def create_bottle_plan(
 
     ordered_catalog = sorted(catalog, key=sort_key)
 
-    for r_pct, g_pct, b_pct, d_pct, current_qty in ordered_catalog:
+    for _, r_pct, g_pct, b_pct, d_pct, current_qty in ordered_catalog:
         recipe = (r_pct, g_pct, b_pct, d_pct)
         target_qty = target_for_recipe(recipe)
 
@@ -232,13 +226,24 @@ def create_bottle_plan(
 @router.post("/deliver/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
 def post_deliver_bottles(potions_delivered: List[PotionMixes], order_id: int):
     """
-    Record delivery of bottled potions.
+    V3:
+    Record delivery of bottled potions in the ledger:
+    - subtract raw ml
+    - add potion inventory
 
-    This subtracts raw ml from global_inventory and increments potions.quantity.
+    Idempotent by order_id.
     """
-    _ = order_id 
-
     with db.engine.begin() as connection:
+        cached = get_processed_response(connection, str(order_id), "bottle_delivery")
+        if cached is not None:
+            return
+
+        transaction_id = create_inventory_transaction(
+            connection,
+            "bottle_delivery",
+            f"bottle delivery order {order_id}",
+        )
+
         for potion in potions_delivered:
             r, g, b, d = potion.potion_type
             q = potion.quantity
@@ -248,46 +253,47 @@ def post_deliver_bottles(potions_delivered: List[PotionMixes], order_id: int):
             blue_ml_used = q * b
             dark_ml_used = q * d
 
-            potion_id = _potion_id_for_recipe(connection, r, g, b, d)
+            sku = _potion_sku_for_recipe(connection, r, g, b, d)
 
-            inv_result = connection.execute(
-                sqlalchemy.text(
-                    """
-                    UPDATE global_inventory
-                    SET red_ml = red_ml - :red_ml_used,
-                        green_ml = green_ml - :green_ml_used,
-                        blue_ml = blue_ml - :blue_ml_used,
-                        dark_ml = dark_ml - :dark_ml_used
-                    WHERE red_ml >= :red_ml_used
-                      AND green_ml >= :green_ml_used
-                      AND blue_ml >= :blue_ml_used
-                      AND dark_ml >= :dark_ml_used
-                    """
-                ),
-                {
-                    "red_ml_used": red_ml_used,
-                    "green_ml_used": green_ml_used,
-                    "blue_ml_used": blue_ml_used,
-                    "dark_ml_used": dark_ml_used,
-                },
-            )
-
-            if inv_result.rowcount != 1:
+            # Safety check against current ledger balances
+            if get_ml_balance(connection, "red") < red_ml_used:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Insufficient raw ml for this delivery",
+                    detail="Insufficient red ml for this delivery",
+                )
+            if get_ml_balance(connection, "green") < green_ml_used:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Insufficient green ml for this delivery",
+                )
+            if get_ml_balance(connection, "blue") < blue_ml_used:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Insufficient blue ml for this delivery",
+                )
+            if get_ml_balance(connection, "dark") < dark_ml_used:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Insufficient dark ml for this delivery",
                 )
 
-            connection.execute(
-                sqlalchemy.text(
-                    """
-                    UPDATE potions
-                    SET quantity = quantity + :q
-                    WHERE id = :potion_id
-                    """
-                ),
-                {"q": q, "potion_id": potion_id},
-            )
+            if red_ml_used:
+                add_ledger_entry(connection, transaction_id, "ml", "red", -red_ml_used)
+            if green_ml_used:
+                add_ledger_entry(connection, transaction_id, "ml", "green", -green_ml_used)
+            if blue_ml_used:
+                add_ledger_entry(connection, transaction_id, "ml", "blue", -blue_ml_used)
+            if dark_ml_used:
+                add_ledger_entry(connection, transaction_id, "ml", "dark", -dark_ml_used)
+
+            add_ledger_entry(connection, transaction_id, "potion", sku, q)
+
+        store_processed_response(
+            connection,
+            str(order_id),
+            "bottle_delivery",
+            {"status": "ok"},
+        )
 
 
 @router.post("/plan", response_model=List[PotionMixes])
@@ -296,24 +302,21 @@ def get_bottle_plan():
     Gets the plan for bottling potions.
 
     Colors are expressed as integers from 0 to 100 and must sum to exactly 100.
+    V3 reads raw ml from the ledger.
     """
     with db.engine.begin() as connection:
-        row = connection.execute(
-            sqlalchemy.text(
-                """
-                SELECT red_ml, green_ml, blue_ml, dark_ml
-                FROM global_inventory
-                """
-            )
-        ).one()
+        red_ml = get_ml_balance(connection, "red")
+        green_ml = get_ml_balance(connection, "green")
+        blue_ml = get_ml_balance(connection, "blue")
+        dark_ml = get_ml_balance(connection, "dark")
 
         catalog = _catalog_rows_for_planning(connection)
 
     return create_bottle_plan(
-        red_ml=row.red_ml,
-        green_ml=row.green_ml,
-        blue_ml=row.blue_ml,
-        dark_ml=row.dark_ml,
+        red_ml=red_ml,
+        green_ml=green_ml,
+        blue_ml=blue_ml,
+        dark_ml=dark_ml,
         catalog=catalog,
     )
 

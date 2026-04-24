@@ -1,4 +1,4 @@
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, call
 from typing import List
 
 from src.api.barrels import (
@@ -6,6 +6,7 @@ from src.api.barrels import (
     BarrelOrder,
     calculate_barrel_summary,
     create_barrel_plan,
+    post_deliver_barrels,
 )
 
 
@@ -33,7 +34,7 @@ def test_barrel_delivery_summary() -> None:
 
 
 @patch("src.api.barrels._ingredient_shortfalls")
-def test_buy_cheapest_red_barrel_when_red_shortfall_is_highest(
+def test_buy_best_value_per_ml_red_barrel_when_red_shortfall_is_highest(
     mock_shortfalls: Mock,
 ) -> None:
     mock_shortfalls.return_value = {
@@ -68,7 +69,7 @@ def test_buy_cheapest_red_barrel_when_red_shortfall_is_highest(
     ]
 
     orders = create_barrel_plan(
-        gold=200,
+        gold=300,
         max_barrel_capacity=10000,
         current_red_ml=0,
         current_green_ml=0,
@@ -81,7 +82,7 @@ def test_buy_cheapest_red_barrel_when_red_shortfall_is_highest(
     assert isinstance(orders, list)
     assert len(orders) == 1
     assert isinstance(orders[0], BarrelOrder)
-    assert orders[0].sku == "SMALL_RED_BARREL"
+    assert orders[0].sku == "LARGE_RED_BARREL"
     assert orders[0].quantity == 1
 
 
@@ -204,3 +205,86 @@ def test_no_barrel_plan_when_capacity_is_full(
     )
 
     assert orders == []
+
+
+@patch("src.api.barrels.store_processed_response")
+@patch("src.api.barrels.add_ledger_entry")
+@patch("src.api.barrels.create_inventory_transaction")
+@patch("src.api.barrels.get_processed_response")
+def test_post_deliver_barrels_first_call_writes_ledger(
+    mock_get_processed_response: Mock,
+    mock_create_inventory_transaction: Mock,
+    mock_add_ledger_entry: Mock,
+    mock_store_processed_response: Mock,
+) -> None:
+    mock_get_processed_response.return_value = None
+    mock_create_inventory_transaction.return_value = 42
+
+    barrels_delivered = [
+        Barrel(
+            sku="SMALL_RED_BARREL",
+            ml_per_barrel=1000,
+            potion_type=[1.0, 0.0, 0.0, 0.0],
+            price=100,
+            quantity=2,
+        ),
+        Barrel(
+            sku="SMALL_DARK_BARREL",
+            ml_per_barrel=800,
+            potion_type=[0.0, 0.0, 0.0, 1.0],
+            price=120,
+            quantity=1,
+        ),
+    ]
+
+    post_deliver_barrels(barrels_delivered, order_id=123)
+
+    mock_get_processed_response.assert_called_once()
+    mock_create_inventory_transaction.assert_called_once()
+
+    # gold entry + red ml entry + dark ml entry
+    assert mock_add_ledger_entry.call_count == 3
+    mock_add_ledger_entry.assert_has_calls(
+        [
+            call(AnyConnection(), 42, "gold", "gold", -320),
+            call(AnyConnection(), 42, "ml", "red", 2000),
+            call(AnyConnection(), 42, "ml", "dark", 800),
+        ],
+        any_order=False,
+    )
+
+    mock_store_processed_response.assert_called_once()
+
+
+@patch("src.api.barrels.store_processed_response")
+@patch("src.api.barrels.add_ledger_entry")
+@patch("src.api.barrels.create_inventory_transaction")
+@patch("src.api.barrels.get_processed_response")
+def test_post_deliver_barrels_retry_does_nothing(
+    mock_get_processed_response: Mock,
+    mock_create_inventory_transaction: Mock,
+    mock_add_ledger_entry: Mock,
+    mock_store_processed_response: Mock,
+) -> None:
+    mock_get_processed_response.return_value = {"status": "ok"}
+
+    barrels_delivered = [
+        Barrel(
+            sku="SMALL_RED_BARREL",
+            ml_per_barrel=1000,
+            potion_type=[1.0, 0.0, 0.0, 0.0],
+            price=100,
+            quantity=1,
+        ),
+    ]
+
+    post_deliver_barrels(barrels_delivered, order_id=123)
+
+    mock_create_inventory_transaction.assert_not_called()
+    mock_add_ledger_entry.assert_not_called()
+    mock_store_processed_response.assert_not_called()
+
+
+class AnyConnection:
+    def __eq__(self, other) -> bool:
+        return True
