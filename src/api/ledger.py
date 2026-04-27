@@ -1,5 +1,7 @@
+import json
 import sqlalchemy
 from sqlalchemy.engine import Connection
+
 
 def ledger_balance(connection: Connection, resource_type: str, resource_key: str) -> int:
     value = connection.execute(
@@ -18,6 +20,7 @@ def ledger_balance(connection: Connection, resource_type: str, resource_key: str
     ).scalar_one()
     return int(value)
 
+
 def get_gold_balance(connection) -> int:
     result = connection.execute(
         sqlalchemy.text(
@@ -31,6 +34,7 @@ def get_gold_balance(connection) -> int:
     ).one()
 
     return int(result.gold)
+
 
 def get_ml_balance(connection, color: str) -> int:
     result = connection.execute(
@@ -47,6 +51,7 @@ def get_ml_balance(connection, color: str) -> int:
 
     return int(result.ml)
 
+
 def get_potion_balance(connection, sku: str) -> int:
     result = connection.execute(
         sqlalchemy.text(
@@ -61,6 +66,7 @@ def get_potion_balance(connection, sku: str) -> int:
     ).one()
 
     return int(result.quantity)
+
 
 def total_potion_balance(connection: Connection) -> int:
     value = connection.execute(
@@ -79,11 +85,8 @@ def get_total_potions(connection: Connection) -> int:
     """Total bottled potion units (all SKUs) from the ledger; alias for inventory audit."""
     return total_potion_balance(connection)
 
-def create_inventory_transaction(
-    connection: Connection,
-    transaction_type: str,
-    description: str | None = None,
-) -> int:
+
+def create_inventory_transaction(connection: Connection, transaction_type: str, description: str | None = None) -> int:
     row = connection.execute(
         sqlalchemy.text(
             """
@@ -124,6 +127,7 @@ def add_ledger_entry(
         },
     )
 
+
 def get_processed_response(connection: Connection, request_id: str, endpoint: str):
     row = connection.execute(
         sqlalchemy.text(
@@ -143,25 +147,26 @@ def get_processed_response(connection: Connection, request_id: str, endpoint: st
     if row is None:
         return None
 
-    return row.response
+    r = row.response
+    if isinstance(r, str):
+        r = json.loads(r)
+    return r
 
 
 def store_processed_response(
-    connection: Connection,
-    request_id: str,
-    endpoint: str,
-    response: dict,
+    connection: Connection, request_id: str, endpoint: str, response: dict
 ) -> None:
+    """One INSERT per successful idempotent operation """
     connection.execute(
         sqlalchemy.text(
             """
             INSERT INTO processed_requests (request_id, endpoint, response)
-            VALUES (:request_id, :endpoint, :response)
+            VALUES (:request_id, :endpoint, CAST(:response_json AS jsonb))
             """
         ),
         {
             "request_id": request_id,
             "endpoint": endpoint,
-            "response": response,
+            "response_json": json.dumps(response),
         },
     )
