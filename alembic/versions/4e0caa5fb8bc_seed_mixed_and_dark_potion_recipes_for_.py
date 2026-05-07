@@ -21,11 +21,11 @@ def upgrade() -> None:
         """
         INSERT INTO potions (sku, name, price, red_pct, green_pct, blue_pct, dark_pct, quantity)
         VALUES
-            ('r50g0b50d0',   '50/0/50/0',   60, 50,  0, 50,  0, 0),
-            ('r50g50b0d0',   '50/50/0/0',   60, 50, 50,  0,  0, 0),
-            ('r0g50b50d0',   '0/50/50/0',   60,  0, 50, 50,  0, 0),
-            ('r25g25b25d25', '25/25/25/25', 70, 25, 25, 25, 25, 0),
-            ('r0g0b0d100',   '0/0/0/100',   65,  0,  0,  0,100, 0)
+            ('r50g0b50d0',   'Purple',  60, 50,  0, 50,  0, 0),
+            ('r50g50b0d0',   'Yellow',  60, 50, 50,  0,  0, 0),
+            ('r0g50b50d0',   'Cyan',    60,  0, 50, 50,  0, 0),
+            ('r25g25b25d25', 'Rainbow', 70, 25, 25, 25, 25, 0),
+            ('r0g0b0d100',   'Dark',    65,  0,  0,  0,100, 0)
         ON CONFLICT (sku) DO NOTHING
         """
     )
