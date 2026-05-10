@@ -29,6 +29,7 @@ def reset():
             sqlalchemy.text(
                 """
                 TRUNCATE TABLE
+                    barrel_catalog_offerings,
                     sale_events,
                     processed_requests,
                     inventory_ledger_entries,

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import math
 from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field, field_validator
@@ -87,6 +88,81 @@ def _resource_key_for_pure_barrel(barrel: Barrel) -> str | None:
         if math.isclose(pt[i], 1.0, rel_tol=0, abs_tol=1e-5):
             return color
     return None
+
+
+def liquid_type_label(barrel: Barrel) -> str:
+    """readable liquid label: ledger color key for pure barrels, else mixed."""
+    label = _resource_key_for_pure_barrel(barrel)
+    return label if label is not None else "mixed"
+
+
+def record_barrel_catalog_snapshot(
+    connection: Connection,
+    wholesale_catalog: List[Barrel],
+    *,
+    snapshot_at: datetime | None = None,
+) -> None:
+    """
+    Persist each wholesale barrel row for analytics
+    All rows in one request share the same snapshot_at.
+    """
+    if not wholesale_catalog:
+        return
+
+    ts = snapshot_at if snapshot_at is not None else datetime.now(timezone.utc)
+    rows: list[dict] = []
+
+    for b in wholesale_catalog:
+        r, g, bl, d = b.potion_type
+        rows.append(
+            {
+                "snapshot_at": ts,
+                "sku": b.sku,
+                "ml_per_barrel": b.ml_per_barrel,
+                "price": b.price,
+                "catalog_quantity": b.quantity,
+                "red_frac": float(r),
+                "green_frac": float(g),
+                "blue_frac": float(bl),
+                "dark_frac": float(d),
+                "liquid_type": liquid_type_label(b),
+                "cost_per_ml": float(b.price) / float(b.ml_per_barrel),
+            }
+        )
+
+    connection.execute(
+        sqlalchemy.text(
+            """
+            INSERT INTO barrel_catalog_offerings (
+                snapshot_at,
+                sku,
+                ml_per_barrel,
+                price,
+                catalog_quantity,
+                red_frac,
+                green_frac,
+                blue_frac,
+                dark_frac,
+                liquid_type,
+                cost_per_ml
+            )
+            VALUES (
+                :snapshot_at,
+                :sku,
+                :ml_per_barrel,
+                :price,
+                :catalog_quantity,
+                :red_frac,
+                :green_frac,
+                :blue_frac,
+                :dark_frac,
+                :liquid_type,
+                :cost_per_ml
+            )
+            """
+        ),
+        rows,
+    )
 
 
 def _pure_barrels_by_color(wholesale_catalog: List[Barrel], color_idx: int) -> List[Barrel]:
@@ -281,6 +357,7 @@ def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
     Gets the plan for purchasing wholesale barrels.
     """
     with db.engine.begin() as connection:
+        record_barrel_catalog_snapshot(connection, wholesale_catalog)
         gold = get_gold_balance(connection)
         red_ml = get_ml_balance(connection, "red")
         green_ml = get_ml_balance(connection, "green")
