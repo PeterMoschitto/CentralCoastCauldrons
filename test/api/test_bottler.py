@@ -14,7 +14,7 @@ def test_bottle_pure_red_up_to_target() -> None:
 
     assert len(result) == 1
     assert result[0].potion_type == [100, 0, 0, 0]
-    assert result[0].quantity == 3
+    assert result[0].quantity == 4
 
 
 def test_no_bottling_when_pure_recipe_already_at_target() -> None:
@@ -23,7 +23,7 @@ def test_no_bottling_when_pure_recipe_already_at_target() -> None:
         green_ml=0,
         blue_ml=0,
         dark_ml=0,
-        catalog=[("RED", 100, 0, 0, 0, 3)],
+        catalog=[("RED", 100, 0, 0, 0, 4)],
     )
 
     assert result == []

@@ -26,7 +26,7 @@ router = APIRouter(
 )
 
 # align barrel strat with bottler
-PURE_TARGET = 3
+PURE_TARGET = 4
 MIXED_TARGET = 6
 
 # extra reserve so we do not run dry immediately after one bottling cycle.
@@ -36,6 +36,11 @@ RAW_ML_RESERVE = {
     "blue": 200,
     "dark": 200,
 }
+
+# When RGB raw ml is flush and gold isn't broke, buy dark barrels first if any
+# dark-containing catalog recipe is below bottle targets (Rainbow / Dark SKU).
+MIN_GOLD_FOR_DARK_BARREL_PRIORITY = 100
+RGB_ML_STABLE_FLOOR = 500
 
 
 class Barrel(BaseModel):
@@ -234,6 +239,85 @@ def _ingredient_shortfalls(
     }
 
 
+def _rgb_ml_stable_for_dark_priority(red_ml: int, green_ml: int, blue_ml: int) -> bool:
+    """Enough RGB barrel inventory to brew pairwise mixes without starving."""
+    return (
+        red_ml >= RGB_ML_STABLE_FLOOR
+        and green_ml >= RGB_ML_STABLE_FLOOR
+        and blue_ml >= RGB_ML_STABLE_FLOOR
+    )
+
+
+def _needs_dark_potion_top_up(connection: Connection) -> bool:
+    """True if any recipe that uses dark ml is below its bottle target."""
+    rows = connection.execute(
+        sqlalchemy.text(
+            """
+            SELECT sku, red_pct, green_pct, blue_pct, dark_pct
+            FROM potions
+            """
+        )
+    ).fetchall()
+    for row in rows:
+        if row.dark_pct <= 0:
+            continue
+        recipe = (row.red_pct, row.green_pct, row.blue_pct, row.dark_pct)
+        target = MIXED_TARGET if is_mixed_recipe(recipe) else PURE_TARGET
+        if get_potion_balance(connection, row.sku) < target:
+            return True
+    return False
+
+
+def should_prioritize_dark_barrel(
+    *,
+    gold: int,
+    red_ml: int,
+    green_ml: int,
+    blue_ml: int,
+    connection: Connection,
+) -> bool:
+    """
+    Mid-game: prefer buying dark wholesale barrels when RGB is stable,
+    we can afford mistakes, and Rainbow / dark bottled SKUs need inventory.
+    """
+    return (
+        gold >= MIN_GOLD_FOR_DARK_BARREL_PRIORITY
+        and _rgb_ml_stable_for_dark_priority(red_ml, green_ml, blue_ml)
+        and _needs_dark_potion_top_up(connection)
+    )
+
+
+def _try_buy_one_pure_barrel_for_color(
+    color_name: str,
+    shortfall: int,
+    wholesale_catalog: List[Barrel],
+    gold: int,
+    remaining_capacity: int,
+) -> List[BarrelOrder]:
+    if shortfall <= 0:
+        return []
+
+    color_idx = {"red": 0, "green": 1, "blue": 2, "dark": 3}[color_name]
+    candidates = _pure_barrels_by_color(wholesale_catalog, color_idx)
+
+    if not candidates:
+        return []
+
+    affordable = [
+        barrel
+        for barrel in candidates
+        if barrel.price <= gold and barrel.ml_per_barrel <= remaining_capacity
+    ]
+    if not affordable:
+        return []
+
+    chosen = min(
+        affordable,
+        key=lambda b: (b.price / b.ml_per_barrel, -b.ml_per_barrel),
+    )
+    return [BarrelOrder(sku=chosen.sku, quantity=1)]
+
+
 def create_barrel_plan(
     gold: int,
     max_barrel_capacity: int,
@@ -244,11 +328,16 @@ def create_barrel_plan(
     wholesale_catalog: List[Barrel],
     *,
     connection: Connection,
+    prioritize_dark: bool = False,
 ) -> List[BarrelOrder]:
     """
     Buy one affordable pure-color barrel for the color with the largest raw ml shortfall.
     Of those options, pick the best wholesale value: lowest price per ml
     (then largest ml if tied).
+
+    When prioritize_dark is True, attempt a dark barrel first if dark has positive
+    shortfall and the wholesale catalog offers one we can afford—otherwise fall back
+    to the usual shortfall ordering.
     """
     current_total_ml = current_red_ml + current_green_ml + current_blue_ml + current_dark_ml
     remaining_capacity = max_barrel_capacity - current_total_ml
@@ -264,6 +353,17 @@ def create_barrel_plan(
         current_dark_ml=current_dark_ml,
     )
 
+    if prioritize_dark:
+        dark_first = _try_buy_one_pure_barrel_for_color(
+            "dark",
+            shortfalls["dark"],
+            wholesale_catalog,
+            gold,
+            remaining_capacity,
+        )
+        if dark_first:
+            return dark_first
+
     color_priority = sorted(
         shortfalls.items(),
         key=lambda item: item[1],
@@ -271,28 +371,15 @@ def create_barrel_plan(
     )
 
     for color_name, shortfall in color_priority:
-        if shortfall <= 0:
-            continue
-
-        color_idx = {"red": 0, "green": 1, "blue": 2, "dark": 3}[color_name]
-        candidates = _pure_barrels_by_color(wholesale_catalog, color_idx)
-
-        if not candidates:
-            continue
-
-        affordable = [
-            barrel
-            for barrel in candidates
-            if barrel.price <= gold and barrel.ml_per_barrel <= remaining_capacity
-        ]
-        if not affordable:
-            continue
-
-        chosen = min(
-            affordable,
-            key=lambda b: (b.price / b.ml_per_barrel, -b.ml_per_barrel),
+        order = _try_buy_one_pure_barrel_for_color(
+            color_name,
+            shortfall,
+            wholesale_catalog,
+            gold,
+            remaining_capacity,
         )
-        return [BarrelOrder(sku=chosen.sku, quantity=1)]
+        if order:
+            return order
 
     return []
 
@@ -364,6 +451,14 @@ def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
         blue_ml = get_ml_balance(connection, "blue")
         dark_ml = get_ml_balance(connection, "dark")
 
+        prioritize_dark = should_prioritize_dark_barrel(
+            gold=gold,
+            red_ml=red_ml,
+            green_ml=green_ml,
+            blue_ml=blue_ml,
+            connection=connection,
+        )
+
         return create_barrel_plan(
             gold=gold,
             max_barrel_capacity=10000,
@@ -373,4 +468,5 @@ def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
             current_dark_ml=dark_ml,
             wholesale_catalog=wholesale_catalog,
             connection=connection,
+            prioritize_dark=prioritize_dark,
         )

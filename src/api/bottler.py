@@ -22,7 +22,7 @@ router = APIRouter(
 )
 
 
-PURE_TARGET = 3
+PURE_TARGET = 4
 MIXED_TARGET = 6
 
 

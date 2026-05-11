@@ -207,6 +207,94 @@ def test_no_barrel_plan_when_capacity_is_full(
     assert orders == []
 
 
+@patch("src.api.barrels._ingredient_shortfalls")
+def test_prioritize_dark_prefers_dark_even_when_red_shortfall_higher(
+    mock_shortfalls: Mock,
+) -> None:
+    mock_shortfalls.return_value = {
+        "red": 9000,
+        "green": 0,
+        "blue": 0,
+        "dark": 50,
+    }
+
+    wholesale_catalog: List[Barrel] = [
+        Barrel(
+            sku="SMALL_DARK_BARREL",
+            ml_per_barrel=800,
+            potion_type=[0.0, 0.0, 0.0, 1.0],
+            price=80,
+            quantity=10,
+        ),
+        Barrel(
+            sku="SMALL_RED_BARREL",
+            ml_per_barrel=1000,
+            potion_type=[1.0, 0.0, 0.0, 0.0],
+            price=100,
+            quantity=10,
+        ),
+    ]
+
+    orders = create_barrel_plan(
+        gold=500,
+        max_barrel_capacity=10000,
+        current_red_ml=600,
+        current_green_ml=600,
+        current_blue_ml=600,
+        current_dark_ml=0,
+        wholesale_catalog=wholesale_catalog,
+        connection=Mock(),
+        prioritize_dark=True,
+    )
+
+    assert len(orders) == 1
+    assert orders[0].sku == "SMALL_DARK_BARREL"
+
+
+@patch("src.api.barrels._ingredient_shortfalls")
+def test_prioritize_dark_falls_back_when_dark_not_affordable(
+    mock_shortfalls: Mock,
+) -> None:
+    mock_shortfalls.return_value = {
+        "red": 9000,
+        "green": 0,
+        "blue": 0,
+        "dark": 50,
+    }
+
+    wholesale_catalog: List[Barrel] = [
+        Barrel(
+            sku="EXPENSIVE_DARK",
+            ml_per_barrel=800,
+            potion_type=[0.0, 0.0, 0.0, 1.0],
+            price=9999,
+            quantity=10,
+        ),
+        Barrel(
+            sku="SMALL_RED_BARREL",
+            ml_per_barrel=1000,
+            potion_type=[1.0, 0.0, 0.0, 0.0],
+            price=100,
+            quantity=10,
+        ),
+    ]
+
+    orders = create_barrel_plan(
+        gold=500,
+        max_barrel_capacity=10000,
+        current_red_ml=600,
+        current_green_ml=600,
+        current_blue_ml=600,
+        current_dark_ml=0,
+        wholesale_catalog=wholesale_catalog,
+        connection=Mock(),
+        prioritize_dark=True,
+    )
+
+    assert len(orders) == 1
+    assert orders[0].sku == "SMALL_RED_BARREL"
+
+
 @patch("src.api.barrels.store_processed_response")
 @patch("src.api.barrels.add_ledger_entry")
 @patch("src.api.barrels.create_inventory_transaction")

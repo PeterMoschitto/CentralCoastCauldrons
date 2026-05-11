@@ -33,25 +33,6 @@ The hourly sales chart shows that Red is the most consistently purchased potion 
 
 Each time the simulator calls `POST /barrels/plan`, the newly implemented `barrel_catalog_offerings` table with one row per barrel line in that catalog is now tracked. `snapshot_at` is shared by every row in that request so when offered is the same timestamp for the whole menu.
 
-### SQL — latest wholesale menu
-
-```sql
-WITH latest AS (
-  SELECT MAX(snapshot_at) AS ts
-  FROM barrel_catalog_offerings
-)
-SELECT
-  sku AS barrel_type,
-  snapshot_at AS offered_when,
-  liquid_type,
-  cost_per_ml AS cost_per_ml_gold,
-  ml_per_barrel,
-  price,
-  catalog_quantity
-FROM barrel_catalog_offerings
-WHERE snapshot_at = (SELECT ts FROM latest)
-ORDER BY sku;
-```
 
 ### SQL — every captured catalog over time
 
@@ -65,9 +46,37 @@ FROM barrel_catalog_offerings
 ORDER BY snapshot_at DESC, sku;
 ```
 
+### Visualization
+| Barrel Type | Offered When | Liquid Type | Cost per mL (gold) |
+|---|---|---|---:|
+| MEDIUM_BLUE_BARREL | 2026-05-11 00:11:58.033407+00 | blue | 0.12000000 |
+| MEDIUM_GREEN_BARREL | 2026-05-11 00:11:58.033407+00 | green | 0.10000000 |
+| MEDIUM_RED_BARREL | 2026-05-11 00:11:58.033407+00 | red | 0.10000000 |
+| MINI_BLUE_BARREL | 2026-05-11 00:11:58.033407+00 | blue | 0.30000000 |
+| MINI_GREEN_BARREL | 2026-05-11 00:11:58.033407+00 | green | 0.30000000 |
+| MINI_RED_BARREL | 2026-05-11 00:11:58.033407+00 | red | 0.30000000 |
+| SMALL_BLUE_BARREL | 2026-05-11 00:11:58.033407+00 | blue | 0.24000000 |
+| SMALL_GREEN_BARREL | 2026-05-11 00:11:58.033407+00 | green | 0.20000000 |
+| SMALL_RED_BARREL | 2026-05-11 00:11:58.033407+00 | red | 0.20000000 |
+| MEDIUM_BLUE_BARREL | 2026-05-11 04:13:59.071192+00 | blue | 0.12000000 |
+| MEDIUM_GREEN_BARREL | 2026-05-11 04:13:59.071192+00 | green | 0.10000000 |
+| MEDIUM_RED_BARREL | 2026-05-11 04:13:59.071192+00 | red | 0.10000000 |
+| MINI_BLUE_BARREL | 2026-05-11 04:13:59.071192+00 | blue | 0.30000000 |
+| MINI_GREEN_BARREL | 2026-05-11 04:13:59.071192+00 | green | 0.30000000 |
+| MINI_RED_BARREL | 2026-05-11 04:13:59.071192+00 | red | 0.30000000 |
+| SMALL_BLUE_BARREL | 2026-05-11 04:13:59.071192+00 | blue | 0.24000000 |
+| SMALL_GREEN_BARREL | 2026-05-11 04:13:59.071192+00 | green | 0.20000000 |
+| SMALL_RED_BARREL | 2026-05-11 04:13:59.071192+00 | red | 0.20000000 |
+| MEDIUM_BLUE_BARREL | 2026-05-11 08:15:01.80098+00 | blue | 0.12000000 |
+| MEDIUM_GREEN_BARREL | 2026-05-11 08:15:01.80098+00 | green | 0.10000000 |
+| MEDIUM_RED_BARREL | 2026-05-11 08:15:01.80098+00 | red | 0.10000000 |
+| MINI_BLUE_BARREL | 2026-05-11 08:15:01.80098+00 | blue | 0.30000000 |
+... (this is not the entire data set. Just a part of it)
 
-### Interpretation:
-This table helps compare barrel options by both timing and cost efficiency. The most important takeaway is which barrel types offer the lowest cost per ml for each liquid type, since these are the best candidates for improving margins when demand is strong enough to justify buying them. This metric is useful operationally because it connects purchasing decisions to profitability, if a cheaper barrel option lines up with a high demand liquid type, it should be prioritized.
+
+
+Interpretation:
+This barrel offer data shows that barrel availability changes across the day, and the most cost efficient options are not always available at every time window. Earlier offer windows only include medium, small, and mini barrels, while later windows add large barrels, which are consistently the cheapest per ml. This suggests that timing matters for purchasing strategy. If my shop can afford to wait, buying during windows when large barrels are offered should reduce input cost and improve profit.
 ---
 
 ## Metric 3 — Class, species, and level vs potion type
