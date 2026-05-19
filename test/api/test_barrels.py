@@ -1,4 +1,4 @@
-from unittest.mock import Mock, patch, call
+from unittest.mock import MagicMock, Mock, patch, call
 from typing import List
 
 from src.api.barrels import (
@@ -295,6 +295,7 @@ def test_prioritize_dark_falls_back_when_dark_not_affordable(
     assert orders[0].sku == "SMALL_RED_BARREL"
 
 
+@patch("src.api.barrels.db.engine.begin")
 @patch("src.api.barrels.store_processed_response")
 @patch("src.api.barrels.add_ledger_entry")
 @patch("src.api.barrels.create_inventory_transaction")
@@ -304,9 +305,12 @@ def test_post_deliver_barrels_first_call_writes_ledger(
     mock_create_inventory_transaction: Mock,
     mock_add_ledger_entry: Mock,
     mock_store_processed_response: Mock,
+    mock_engine_begin: Mock,
 ) -> None:
     mock_get_processed_response.return_value = None
     mock_create_inventory_transaction.return_value = 42
+    mock_engine_begin.return_value.__enter__.return_value = MagicMock()
+    mock_engine_begin.return_value.__exit__.return_value = None
 
     barrels_delivered = [
         Barrel(
@@ -344,6 +348,7 @@ def test_post_deliver_barrels_first_call_writes_ledger(
     mock_store_processed_response.assert_called_once()
 
 
+@patch("src.api.barrels.db.engine.begin")
 @patch("src.api.barrels.store_processed_response")
 @patch("src.api.barrels.add_ledger_entry")
 @patch("src.api.barrels.create_inventory_transaction")
@@ -353,8 +358,11 @@ def test_post_deliver_barrels_retry_does_nothing(
     mock_create_inventory_transaction: Mock,
     mock_add_ledger_entry: Mock,
     mock_store_processed_response: Mock,
+    mock_engine_begin: Mock,
 ) -> None:
     mock_get_processed_response.return_value = {"status": "ok"}
+    mock_engine_begin.return_value.__enter__.return_value = MagicMock()
+    mock_engine_begin.return_value.__exit__.return_value = None
 
     barrels_delivered = [
         Barrel(

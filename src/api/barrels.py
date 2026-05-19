@@ -15,6 +15,7 @@ from src.api.ledger import (
     get_ml_balance,
     get_potion_balance,
     get_processed_response,
+    max_ml_storage_capacity,
     store_processed_response,
 )
 from src import database as db
@@ -459,9 +460,11 @@ def get_wholesale_purchase_plan(wholesale_catalog: List[Barrel]):
             connection=connection,
         )
 
+        max_ml = max_ml_storage_capacity(connection)
+
         return create_barrel_plan(
             gold=gold,
-            max_barrel_capacity=10000,
+            max_barrel_capacity=max_ml,
             current_red_ml=red_ml,
             current_green_ml=green_ml,
             current_blue_ml=blue_ml,

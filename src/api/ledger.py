@@ -2,6 +2,17 @@ import json
 import sqlalchemy
 from sqlalchemy.engine import Connection
 
+# Shop capacity tiers (Potion Exchange): base storage plus purchased units in ledger.
+CAPACITY_RESOURCE_TYPE = "capacity"
+CAPACITY_KEY_ML = "ml"
+CAPACITY_KEY_POTION = "potion"
+
+ML_STORAGE_BASE = 10_000
+ML_STORAGE_PER_TIER = 10_000
+POTION_STORAGE_BASE = 50
+POTION_STORAGE_PER_TIER = 50
+CAPACITY_UNIT_GOLD_COST = 1000
+
 
 def ledger_balance(connection: Connection, resource_type: str, resource_key: str) -> int:
     value = connection.execute(
@@ -84,6 +95,26 @@ def total_potion_balance(connection: Connection) -> int:
 def get_total_potions(connection: Connection) -> int:
     """Total bottled potion units (all SKUs) from the ledger; alias for inventory audit."""
     return total_potion_balance(connection)
+
+
+def purchased_ml_capacity_units(connection: Connection) -> int:
+    """Extra ML capacity tiers purchased (each tier adds ML_STORAGE_PER_TIER ml of max storage)."""
+    return max(0, ledger_balance(connection, CAPACITY_RESOURCE_TYPE, CAPACITY_KEY_ML))
+
+
+def purchased_potion_capacity_units(connection: Connection) -> int:
+    """Extra potion slot tiers purchased (each tier adds POTION_STORAGE_PER_TIER bottle slots)."""
+    return max(0, ledger_balance(connection, CAPACITY_RESOURCE_TYPE, CAPACITY_KEY_POTION))
+
+
+def max_ml_storage_capacity(connection: Connection) -> int:
+    """Maximum total ml held in barrels (base tier plus ledger-recorded purchases)."""
+    return ML_STORAGE_BASE + ML_STORAGE_PER_TIER * purchased_ml_capacity_units(connection)
+
+
+def max_potion_storage_capacity(connection: Connection) -> int:
+    """Maximum bottled potion count (base tier plus ledger-recorded purchases)."""
+    return POTION_STORAGE_BASE + POTION_STORAGE_PER_TIER * purchased_potion_capacity_units(connection)
 
 
 def create_inventory_transaction(connection: Connection, transaction_type: str, description: str | None = None) -> int:

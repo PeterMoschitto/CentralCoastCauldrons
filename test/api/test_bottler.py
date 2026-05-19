@@ -1,4 +1,4 @@
-from unittest.mock import Mock, patch, call
+from unittest.mock import MagicMock, Mock, patch, call
 
 from src.api.bottler import create_bottle_plan, post_deliver_bottles, PotionMixes
 
@@ -121,6 +121,7 @@ def test_no_plan_when_no_recipe_can_be_bottled() -> None:
     assert result == []
 
 
+@patch("src.api.bottler.db.engine.begin")
 @patch("src.api.bottler.store_processed_response")
 @patch("src.api.bottler.add_ledger_entry")
 @patch("src.api.bottler._potion_sku_for_recipe")
@@ -134,11 +135,14 @@ def test_post_deliver_bottles_first_call_writes_ledger(
     mock_potion_sku_for_recipe: Mock,
     mock_add_ledger_entry: Mock,
     mock_store_processed_response: Mock,
+    mock_engine_begin: Mock,
 ) -> None:
     mock_get_processed_response.return_value = None
     mock_create_inventory_transaction.return_value = 55
     mock_potion_sku_for_recipe.return_value = "PURPLE"
     mock_get_ml_balance.return_value = 1000
+    mock_engine_begin.return_value.__enter__.return_value = MagicMock()
+    mock_engine_begin.return_value.__exit__.return_value = None
 
     potions_delivered = [
         PotionMixes(potion_type=[50, 0, 50, 0], quantity=2),
@@ -164,6 +168,7 @@ def test_post_deliver_bottles_first_call_writes_ledger(
     mock_store_processed_response.assert_called_once()
 
 
+@patch("src.api.bottler.db.engine.begin")
 @patch("src.api.bottler.store_processed_response")
 @patch("src.api.bottler.add_ledger_entry")
 @patch("src.api.bottler._potion_sku_for_recipe")
@@ -177,8 +182,11 @@ def test_post_deliver_bottles_retry_does_nothing(
     mock_potion_sku_for_recipe: Mock,
     mock_add_ledger_entry: Mock,
     mock_store_processed_response: Mock,
+    mock_engine_begin: Mock,
 ) -> None:
     mock_get_processed_response.return_value = {"status": "ok"}
+    mock_engine_begin.return_value.__enter__.return_value = MagicMock()
+    mock_engine_begin.return_value.__exit__.return_value = None
 
     potions_delivered = [
         PotionMixes(potion_type=[50, 0, 50, 0], quantity=2),
