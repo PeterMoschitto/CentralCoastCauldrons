@@ -65,7 +65,8 @@ def create_catalog() -> List[CatalogItem]:
                 )
             )
 
-    return catalog
+    # PE rejects catalogs with more than 6 listings (PARSE_CATALOG).
+    return catalog[:6]
 
 
 @router.get("/catalog/", tags=["catalog"], response_model=List[CatalogItem])

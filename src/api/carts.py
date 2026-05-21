@@ -1,3 +1,6 @@
+import base64
+import binascii
+import json
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -68,6 +71,42 @@ class SearchResponse(BaseModel):
     results: List[LineItem]
 
 
+_SORT_SQL_BY_COLUMN: dict[SearchSortOptions, str] = {
+    SearchSortOptions.customer_name: "customer_name",
+    SearchSortOptions.item_sku: "potion_sku",
+    SearchSortOptions.line_item_total: "(quantity * unit_price)",
+    SearchSortOptions.timestamp: "sold_at",
+}
+
+# Page size for order search 
+SEARCH_PAGE_SIZE = 10
+
+
+def _encode_search_cursor(payload: dict) -> str:
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_search_cursor(token: str) -> dict:
+    pad = "=" * (-len(token) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(token + pad)
+        return json.loads(raw.decode())
+    except (ValueError, json.JSONDecodeError, binascii.Error) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid search_page token",
+        ) from exc
+
+
+def _format_sale_timestamp(value: object) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if value is None:
+        return ""
+    return str(value)
+
+
 @router.get("/search/", response_model=SearchResponse, tags=["search"])
 def search_orders(
     customer_name: str = "",
@@ -78,15 +117,109 @@ def search_orders(
 ):
     """
     Search for cart line items by customer name and/or potion sku.
-    Placeholder implementation for now.
-    """
-    _ = customer_name
-    _ = potion_sku
-    _ = search_page
-    _ = sort_col
-    _ = sort_order
 
-    return SearchResponse(previous=None, next=None, results=[])
+    Uses sale_events with optional ILIKE filters, sort enums, and cursor paging via search_page /
+    previous / next tokens 
+    """
+    cust = customer_name.strip()
+    sku = potion_sku.strip()
+    sort_col_val = sort_col.value
+    sort_order_val = sort_order.value
+
+    offset = 0
+    token_in = search_page.strip()
+    if token_in:
+        cursor = _decode_search_cursor(token_in)
+        try:
+            if (
+                cursor.get("cust") != cust
+                or cursor.get("sku") != sku
+                or cursor.get("sort_col") != sort_col_val
+                or cursor.get("sort_order") != sort_order_val
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="search_page does not match current query parameters",
+                )
+            offset = int(cursor["offset"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Malformed search_page payload",
+            ) from exc
+
+        if offset < 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid offset in search_page",
+            )
+
+    clauses: List[str] = []
+    params: dict[str, str | int] = {}
+    if cust:
+        clauses.append("customer_name ILIKE :cust_pat")
+        params["cust_pat"] = f"%{cust}%"
+    if sku:
+        clauses.append("potion_sku ILIKE :sku_pat")
+        params["sku_pat"] = f"%{sku}%"
+
+    where_sql = " AND ".join(clauses) if clauses else "TRUE"
+
+    order_expr = _SORT_SQL_BY_COLUMN[sort_col]
+    direction = "DESC" if sort_order == SearchSortOrder.desc else "ASC"
+
+    fetch_limit = SEARCH_PAGE_SIZE + 1
+    params["limit"] = fetch_limit
+    params["offset"] = offset
+
+    sql = sqlalchemy.text(
+        f"""
+        SELECT id,
+               potion_sku,
+               customer_name,
+               (quantity * unit_price) AS line_item_total,
+               sold_at
+        FROM sale_events
+        WHERE {where_sql}
+        ORDER BY {order_expr} {direction}, id {direction}
+        LIMIT :limit OFFSET :offset
+        """
+    )
+
+    with db.engine.begin() as connection:
+        rows = connection.execute(sql, params).mappings().all()
+
+    has_more = len(rows) > SEARCH_PAGE_SIZE
+    page_rows = rows[:SEARCH_PAGE_SIZE]
+
+    results = [
+        LineItem(
+            line_item_id=int(row["id"]),
+            item_sku=row["potion_sku"] or "",
+            customer_name=row["customer_name"] or "",
+            line_item_total=int(row["line_item_total"]),
+            timestamp=_format_sale_timestamp(row["sold_at"]),
+        )
+        for row in page_rows
+    ]
+
+    cursor_base = {
+        "cust": cust,
+        "sku": sku,
+        "sort_col": sort_col_val,
+        "sort_order": sort_order_val,
+    }
+
+    previous_token = None
+    if offset > 0:
+        prev_off = max(0, offset - SEARCH_PAGE_SIZE)
+        previous_token = _encode_search_cursor({**cursor_base, "offset": prev_off})
+
+    next_token = None
+    if has_more:
+        next_token = _encode_search_cursor({**cursor_base, "offset": offset + SEARCH_PAGE_SIZE})
+
+    return SearchResponse(previous=previous_token, next=next_token, results=results)
 
 
 class Customer(BaseModel):
